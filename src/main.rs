@@ -36,9 +36,10 @@ struct Args {
     #[arg(long, env = "CHANNEL_ID")]
     channel_id: Option<String>,
 
-    /// Set channel ID as a human-readable name (max 32 UTF-8 bytes, zero-padded).
+    /// Set channel ID as a human-readable name (max 21 chars).
+    /// Stored as "logos:yolo:<name>" zero-padded to 32 bytes.
     /// Saved to <data-dir>/channel.id on first use.
-    /// Example: --channel-name alice
+    /// Example: --channel-name alice  →  channel ID = "logos:yolo:alice\0…"
     #[arg(long, env = "CHANNEL_NAME")]
     channel_name: Option<String>,
 }
@@ -59,8 +60,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let arr: [u8; 32] = bytes.try_into().expect("--channel-id must be 64 hex chars (32 bytes)");
         ChannelId::from(arr)
     } else if let Some(name) = &args.channel_name {
-        let name_bytes = name.as_bytes();
-        assert!(name_bytes.len() <= 32, "--channel-name must be at most 32 bytes");
+        const PREFIX: &str = "logos:yolo:";
+        let full = format!("{PREFIX}{name}");
+        let name_bytes = full.as_bytes();
+        assert!(name_bytes.len() <= 32, "--channel-name must be at most {} bytes", 32 - PREFIX.len());
         let mut arr = [0u8; 32];
         arr[..name_bytes.len()].copy_from_slice(name_bytes);
         let channel_id = ChannelId::from(arr);
