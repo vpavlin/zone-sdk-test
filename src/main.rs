@@ -31,17 +31,39 @@ struct Args {
     #[arg(long, default_value = ".", env = "DATA_DIR")]
     data_dir: String,
 
-    /// Set channel ID as a hex string (64 hex chars = 32 bytes).
-    /// Takes precedence over --channel-name.
-    #[arg(long, env = "CHANNEL_ID")]
-    channel_id: Option<String>,
+    /// Set your channel. Accepts either:
+    ///   - a human-readable name (max 21 chars) — stored as "logos:yolo:<name>"
+    ///   - a raw 64-char hex string (32 bytes)
+    /// If omitted, a persistent random ID is generated on first run
+    /// and saved to <data-dir>/channel.id.
+    #[arg(long, env = "CHANNEL")]
+    channel: Option<String>,
+}
 
-    /// Set channel ID as a human-readable name (max 21 chars).
-    /// Stored as "logos:yolo:<name>" zero-padded to 32 bytes.
-    /// Saved to <data-dir>/channel.id on first use.
-    /// Example: --channel-name alice  →  channel ID = "logos:yolo:alice\0…"
-    #[arg(long, env = "CHANNEL_NAME")]
-    channel_name: Option<String>,
+const CHANNEL_PREFIX: &str = "logos:yolo:";
+
+/// Parse a channel argument: 64-char hex → raw bytes; anything else → "logos:yolo:<name>".
+fn parse_channel(input: &str) -> ChannelId {
+    // Try hex first (exactly 64 hex chars = 32 bytes)
+    if input.len() == 64 {
+        if let Ok(bytes) = hex::decode(input) {
+            if let Ok(arr) = <[u8; 32]>::try_from(bytes) {
+                return ChannelId::from(arr);
+            }
+        }
+    }
+    // Treat as a human-readable name
+    let full = format!("{CHANNEL_PREFIX}{input}");
+    let name_bytes = full.as_bytes();
+    assert!(
+        name_bytes.len() <= 32,
+        "--channel name too long: max {} chars (got {})",
+        32 - CHANNEL_PREFIX.len(),
+        input.len()
+    );
+    let mut arr = [0u8; 32];
+    arr[..name_bytes.len()].copy_from_slice(name_bytes);
+    ChannelId::from(arr)
 }
 
 #[tokio::main]
@@ -54,20 +76,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load (or generate) the Ed25519 identity key
     let key = config::load_or_create_key(&data_dir.join("sequencer.key"));
 
-    // Resolve channel ID: --channel-id hex → --channel-name text → persisted file → fresh random
-    let my_channel_id = if let Some(hex_id) = &args.channel_id {
-        let bytes = hex::decode(hex_id).expect("--channel-id must be valid hex");
-        let arr: [u8; 32] = bytes.try_into().expect("--channel-id must be 64 hex chars (32 bytes)");
-        ChannelId::from(arr)
-    } else if let Some(name) = &args.channel_name {
-        const PREFIX: &str = "logos:yolo:";
-        let full = format!("{PREFIX}{name}");
-        let name_bytes = full.as_bytes();
-        assert!(name_bytes.len() <= 32, "--channel-name must be at most {} bytes", 32 - PREFIX.len());
-        let mut arr = [0u8; 32];
-        arr[..name_bytes.len()].copy_from_slice(name_bytes);
-        let channel_id = ChannelId::from(arr);
-        // Persist so future runs without --channel-name use the same ID
+    // Resolve channel ID: --channel (hex or name) → persisted file → fresh random
+    let my_channel_id = if let Some(input) = &args.channel {
+        let channel_id = parse_channel(input);
         config::save_channel_id(&data_dir.join("channel.id"), channel_id);
         channel_id
     } else {
