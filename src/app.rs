@@ -409,19 +409,29 @@ impl App {
                 self.input.clear();
 
                 if let Some(rest) = input.strip_prefix("/sub ") {
-                    let hex_id = rest.trim();
-                    match hex::decode(hex_id) {
-                        Ok(bytes) => match <[u8; 32]>::try_from(bytes) {
-                            Ok(arr) => self.subscribe(ChannelId::from(arr)),
-                            Err(_) => {
-                                self.status =
-                                    "invalid channel ID: expected 64 hex chars".to_string();
-                            }
-                        },
-                        Err(_) => {
-                            self.status = "invalid hex in channel ID".to_string();
+                    let arg = rest.trim();
+                    // Accept either a 64-char hex ID or a human-readable name
+                    let channel_id = if arg.len() == 64 {
+                        match hex::decode(arg) {
+                            Ok(bytes) => match <[u8; 32]>::try_from(bytes) {
+                                Ok(arr) => Some(ChannelId::from(arr)),
+                                Err(_) => None,
+                            },
+                            Err(_) => None,
                         }
+                    } else {
+                        None
                     }
+                    .unwrap_or_else(|| {
+                        // Treat as a name: apply logos:yolo: prefix and zero-pad
+                        let full = format!("{}{arg}", config::CHANNEL_PREFIX);
+                        let name_bytes = full.as_bytes();
+                        let mut arr = [0u8; 32];
+                        let len = name_bytes.len().min(32);
+                        arr[..len].copy_from_slice(&name_bytes[..len]);
+                        ChannelId::from(arr)
+                    });
+                    self.subscribe(channel_id);
                 } else if input == "/unsub" {
                     self.unsubscribe_selected();
                 } else if input == "/quit" || input == "/q" {
@@ -477,7 +487,11 @@ impl App {
 
         // Checkpoint updates
         while let Ok(checkpoint) = self.checkpoint_rx.try_recv() {
-            config::save_checkpoint(&self.data_dir.join("sequencer.checkpoint"), &checkpoint);
+            config::save_checkpoint(
+                &self.data_dir.join("sequencer.checkpoint"),
+                &checkpoint,
+                self.my_channel_id,
+            );
         }
 
         // Backfill progress

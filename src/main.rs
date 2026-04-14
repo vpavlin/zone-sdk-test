@@ -85,8 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Channel ID: {}", hex::encode(my_channel_id.as_ref()));
 
-    // Resume from a previous checkpoint if one exists
-    let checkpoint = config::load_checkpoint(&data_dir.join("sequencer.checkpoint"));
+    // Resume from a previous checkpoint if one exists (discarded automatically if channel changed)
+    let checkpoint = config::load_checkpoint(&data_dir.join("sequencer.checkpoint"), my_channel_id);
 
     // Build the node HTTP adapter
     let node = NodeHttpClient::new(CommonHttpClient::new(None), node_url.clone());
