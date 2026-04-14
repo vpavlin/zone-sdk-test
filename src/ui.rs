@@ -58,22 +58,34 @@ fn render_content(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn render_channels(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    use ratatui::text::{Line, Span};
+
     let items: Vec<ListItem> = app
         .channels
         .iter()
         .enumerate()
         .map(|(i, ch)| {
-            let prefix = if i == app.selected { "▶ " } else { "  " };
+            let selected = i == app.selected;
+            let prefix = if selected { "▶ " } else { "  " };
             let sync_tag = if app.syncing.contains(&ch.id) { " ⟳" } else { "" };
-            let label = format!("{prefix}{}{sync_tag}", ch.label);
-            let style = if i == app.selected {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+            let unread = app.unread_count(ch.id);
+
+            if unread > 0 && !selected {
+                let label = format!("{prefix}{}{sync_tag} ", ch.label);
+                let badge = format!("[{unread}]");
+                Line::from(vec![
+                    Span::styled(label, Style::default().fg(Color::White)),
+                    Span::styled(badge, Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                ]).into()
             } else {
-                Style::default().fg(Color::White)
-            };
-            ListItem::new(label).style(style)
+                let label = format!("{prefix}{}{sync_tag}", ch.label);
+                let style = if selected {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(label).style(style)
+            }
         })
         .collect();
 

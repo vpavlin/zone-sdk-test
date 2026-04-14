@@ -55,6 +55,9 @@ pub struct App {
     pub channels: Vec<ChannelEntry>,
     pub selected: usize,
     pub messages: HashMap<ChannelId, VecDeque<DisplayMessage>>,
+    /// How many messages were present the last time each channel was selected.
+    /// unread = messages[ch].len() - seen_count[ch]
+    pub seen_count: HashMap<ChannelId, usize>,
     pub input: String,
     pub status: String,
 
@@ -106,6 +109,7 @@ impl App {
             }],
             selected: 0,
             messages: HashMap::new(),
+            seen_count: HashMap::new(),
             input: String::new(),
             status: String::new(),
             msg_tx,
@@ -450,6 +454,12 @@ impl App {
         }
     }
 
+    pub fn unread_count(&self, channel_id: ChannelId) -> usize {
+        let total = self.messages.get(&channel_id).map(|m| m.len()).unwrap_or(0);
+        let seen = self.seen_count.get(&channel_id).copied().unwrap_or(0);
+        total.saturating_sub(seen)
+    }
+
     fn drain_background_channels(&mut self) {
         // Incoming finalized messages from indexers — clear matching pending entries
         while let Ok((channel_id, block)) = self.msg_rx.try_recv() {
@@ -507,6 +517,11 @@ impl App {
         while let Ok(connected) = self.conn_rx.try_recv() {
             self.node_connected = connected;
         }
+
+        // Mark the currently visible channel as fully read
+        let selected_id = self.channels[self.selected].id;
+        let total = self.messages.get(&selected_id).map(|m| m.len()).unwrap_or(0);
+        self.seen_count.insert(selected_id, total);
     }
 
     pub async fn run(
