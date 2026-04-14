@@ -40,8 +40,6 @@ struct Args {
     channel: Option<String>,
 }
 
-const CHANNEL_PREFIX: &str = "logos:yolo:";
-
 /// Parse a channel argument: 64-char hex → raw bytes; anything else → "logos:yolo:<name>".
 fn parse_channel(input: &str) -> ChannelId {
     // Try hex first (exactly 64 hex chars = 32 bytes)
@@ -53,12 +51,12 @@ fn parse_channel(input: &str) -> ChannelId {
         }
     }
     // Treat as a human-readable name
-    let full = format!("{CHANNEL_PREFIX}{input}");
+    let full = format!("{}{input}", config::CHANNEL_PREFIX);
     let name_bytes = full.as_bytes();
     assert!(
         name_bytes.len() <= 32,
         "--channel name too long: max {} chars (got {})",
-        32 - CHANNEL_PREFIX.len(),
+        32 - config::CHANNEL_PREFIX.len(),
         input.len()
     );
     let mut arr = [0u8; 32];

@@ -46,16 +46,21 @@ pub fn save_channel_id(path: &Path, channel_id: ChannelId) {
     fs::write(path, channel_id.as_ref()).expect("failed to write channel ID file");
 }
 
-/// If the channel ID bytes form a valid UTF-8 string (ignoring trailing NUL padding),
-/// return it. Otherwise return the first 12 hex chars with a "…" suffix.
+pub const CHANNEL_PREFIX: &str = "logos:yolo:";
+
+/// Derive a human-readable label from a channel ID.
+/// - "logos:yolo:<name>" → "<name>"
+/// - other valid UTF-8 (no NUL padding) → the string as-is
+/// - anything else → first 12 hex chars + "…"
 pub fn channel_id_label(channel_id: ChannelId) -> String {
     let bytes = channel_id.as_ref();
-    let trimmed = bytes.trim_ascii_end(); // strip trailing zero bytes
-    if !trimmed.is_empty() {
-        if let Ok(s) = std::str::from_utf8(trimmed) {
-            if s.chars().all(|c| !c.is_control()) {
-                return s.to_string();
-            }
+    // Strip trailing NUL padding
+    let end = bytes.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
+    let trimmed = &bytes[..end];
+    if let Ok(s) = std::str::from_utf8(trimmed) {
+        if s.chars().all(|c| !c.is_control()) {
+            // Strip our namespace prefix so only the user-chosen name is shown
+            return s.strip_prefix(CHANNEL_PREFIX).unwrap_or(s).to_string();
         }
     }
     format!("{}…", &hex::encode(bytes)[..12])
