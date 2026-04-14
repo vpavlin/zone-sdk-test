@@ -27,6 +27,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
 fn render_title(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let channel_hex = hex::encode(app.my_channel_id.as_ref());
+    let channel_name = crate::config::channel_id_label(app.my_channel_id);
     let (conn_dot, conn_color) = if app.node_connected {
         ("●", Color::Green)
     } else {
@@ -39,7 +40,7 @@ fn render_title(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Style::default().bg(Color::Blue).fg(conn_color),
         ),
         Span::styled(
-            format!("Zone Board  |  Your channel: {channel_hex}"),
+            format!("Zone Board  |  Your channel: {channel_name}  ({})", &channel_hex[..16]),
             Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD),
         ),
     ]);
