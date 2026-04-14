@@ -92,7 +92,7 @@ impl App {
         let (sync_tx, sync_rx) = mpsc::channel(64);
         let (conn_tx, conn_rx) = mpsc::channel(64);
 
-        let own_label = format!("[you] {}…", &hex::encode(my_channel_id.as_ref())[..8]);
+        let own_label = format!("[you] {}", config::channel_id_label(my_channel_id));
 
         App {
             my_channel_id,
@@ -281,8 +281,7 @@ impl App {
             self.status = "already subscribed".to_string();
             return;
         }
-        let hex = hex::encode(channel_id.as_ref());
-        let label = format!("{}…", &hex[..12]);
+        let label = config::channel_id_label(channel_id);
         self.channels.push(ChannelEntry {
             id: channel_id,
             label,

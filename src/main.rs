@@ -31,10 +31,16 @@ struct Args {
     #[arg(long, default_value = ".", env = "DATA_DIR")]
     data_dir: String,
 
-    /// Override the channel ID (64 hex chars). If omitted, a persistent random ID
-    /// is generated on first run and saved to <data-dir>/channel.id.
+    /// Set channel ID as a hex string (64 hex chars = 32 bytes).
+    /// Takes precedence over --channel-name.
     #[arg(long, env = "CHANNEL_ID")]
     channel_id: Option<String>,
+
+    /// Set channel ID as a human-readable name (max 32 UTF-8 bytes, zero-padded).
+    /// Saved to <data-dir>/channel.id on first use.
+    /// Example: --channel-name alice
+    #[arg(long, env = "CHANNEL_NAME")]
+    channel_name: Option<String>,
 }
 
 #[tokio::main]
@@ -47,11 +53,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load (or generate) the Ed25519 identity key
     let key = config::load_or_create_key(&data_dir.join("sequencer.key"));
 
-    // Resolve channel ID: CLI/env override → persisted file → fresh random
+    // Resolve channel ID: --channel-id hex → --channel-name text → persisted file → fresh random
     let my_channel_id = if let Some(hex_id) = &args.channel_id {
         let bytes = hex::decode(hex_id).expect("--channel-id must be valid hex");
         let arr: [u8; 32] = bytes.try_into().expect("--channel-id must be 64 hex chars (32 bytes)");
         ChannelId::from(arr)
+    } else if let Some(name) = &args.channel_name {
+        let name_bytes = name.as_bytes();
+        assert!(name_bytes.len() <= 32, "--channel-name must be at most 32 bytes");
+        let mut arr = [0u8; 32];
+        arr[..name_bytes.len()].copy_from_slice(name_bytes);
+        let channel_id = ChannelId::from(arr);
+        // Persist so future runs without --channel-name use the same ID
+        config::save_channel_id(&data_dir.join("channel.id"), channel_id);
+        channel_id
     } else {
         config::load_or_create_channel_id(&data_dir.join("channel.id"))
     };

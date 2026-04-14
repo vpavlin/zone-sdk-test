@@ -42,6 +42,25 @@ pub fn load_or_create_channel_id(path: &Path) -> ChannelId {
     }
 }
 
+pub fn save_channel_id(path: &Path, channel_id: ChannelId) {
+    fs::write(path, channel_id.as_ref()).expect("failed to write channel ID file");
+}
+
+/// If the channel ID bytes form a valid UTF-8 string (ignoring trailing NUL padding),
+/// return it. Otherwise return the first 12 hex chars with a "…" suffix.
+pub fn channel_id_label(channel_id: ChannelId) -> String {
+    let bytes = channel_id.as_ref();
+    let trimmed = bytes.trim_ascii_end(); // strip trailing zero bytes
+    if !trimmed.is_empty() {
+        if let Ok(s) = std::str::from_utf8(trimmed) {
+            if s.chars().all(|c| !c.is_control()) {
+                return s.to_string();
+            }
+        }
+    }
+    format!("{}…", &hex::encode(bytes)[..12])
+}
+
 pub fn load_checkpoint(path: &Path) -> Option<SequencerCheckpoint> {
     if !path.exists() {
         return None;
