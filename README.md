@@ -36,13 +36,20 @@ This project is a **workshop example** showing how to build a real application o
 
 ### Identity and channels
 
-Your identity is an **Ed25519 key pair** stored in `sequencer.key`. The public key is also your **channel ID** — a 32-byte identifier that is unique to you and derived deterministically:
+Your identity has two independent components:
 
-```rust
-let my_channel_id = ChannelId::from(key.public_key().to_bytes());
+- **Signing key** (`sequencer.key`) — an Ed25519 key pair used to authorize inscriptions. Never shared.
+- **Channel ID** (`channel.id`) — a 32-byte address for your feed. This is what you share with others so they can subscribe to you.
+
+On first run a random channel ID is generated and saved. The two are intentionally decoupled: the SDK only requires that the signer is *authorized* for the channel, not that the channel ID equals the public key. This means you can rotate your signing key without changing your channel address, or share a channel between multiple signers.
+
+You can also specify a channel ID explicitly:
+
+```sh
+cargo run -- --node-url http://... --channel-id <64-hex-chars>
+# or
+CHANNEL_ID=<64-hex-chars> cargo run -- --node-url http://...
 ```
-
-This means there is no registration step: your channel exists the moment you start the app, and anyone who knows your public key (= channel ID) can subscribe to your feed.
 
 ### Publishing a message
 
@@ -114,6 +121,7 @@ The node API returns messages in slot ranges. Using 10,000-slot batches keeps th
 | File | Contents | Committed? |
 |------|----------|-----------|
 | `sequencer.key` | 32-byte Ed25519 private key | No (gitignored) |
+| `channel.id` | 32-byte channel address | No (gitignored) |
 | `sequencer.checkpoint` | Last confirmed message ID + pending tx list | No (gitignored) |
 | `subscriptions.json` | Hex channel IDs to re-subscribe on startup | No (gitignored) |
 | `zone-board.log` | Warnings and errors (tail with `tail -f`) | No (gitignored) |

@@ -1,5 +1,6 @@
 use std::{fs, path::Path};
 
+use lb_core::mantle::ops::channel::ChannelId;
 use lb_key_management_system_keys::keys::{ED25519_SECRET_KEY_SIZE, Ed25519Key};
 use lb_zone_sdk::sequencer::SequencerCheckpoint;
 
@@ -24,6 +25,21 @@ pub fn load_or_create_key(path: &Path) -> Ed25519Key {
 pub fn save_checkpoint(path: &Path, checkpoint: &SequencerCheckpoint) {
     let data = serde_json::to_vec(checkpoint).expect("failed to serialize checkpoint");
     fs::write(path, data).expect("failed to write checkpoint");
+}
+
+/// Load an existing channel ID from `path`, or generate and save a fresh random one.
+pub fn load_or_create_channel_id(path: &Path) -> ChannelId {
+    if path.exists() {
+        let bytes = fs::read(path).expect("failed to read channel ID file");
+        assert_eq!(bytes.len(), 32, "channel ID file must be exactly 32 bytes");
+        let arr: [u8; 32] = bytes.try_into().expect("length checked above");
+        ChannelId::from(arr)
+    } else {
+        let mut bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+        fs::write(path, bytes).expect("failed to write channel ID file");
+        ChannelId::from(bytes)
+    }
 }
 
 pub fn load_checkpoint(path: &Path) -> Option<SequencerCheckpoint> {

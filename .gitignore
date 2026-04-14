@@ -3,9 +3,11 @@
 # Runtime data files — contain your private key; do NOT commit
 sequencer.key
 sequencer.checkpoint
+channel.id
 subscriptions.json
 zone-board.log
 
 # If DATA_DIR is set to a subdirectory, ignore those too
 *.key
 *.checkpoint
+*.id

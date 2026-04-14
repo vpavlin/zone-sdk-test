@@ -30,6 +30,11 @@ struct Args {
     /// Directory for storing the signing key, checkpoint, and subscriptions
     #[arg(long, default_value = ".", env = "DATA_DIR")]
     data_dir: String,
+
+    /// Override the channel ID (64 hex chars). If omitted, a persistent random ID
+    /// is generated on first run and saved to <data-dir>/channel.id.
+    #[arg(long, env = "CHANNEL_ID")]
+    channel_id: Option<String>,
 }
 
 #[tokio::main]
@@ -41,7 +46,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load (or generate) the Ed25519 identity key
     let key = config::load_or_create_key(&data_dir.join("sequencer.key"));
-    let my_channel_id = ChannelId::from(key.public_key().to_bytes());
+
+    // Resolve channel ID: CLI/env override → persisted file → fresh random
+    let my_channel_id = if let Some(hex_id) = &args.channel_id {
+        let bytes = hex::decode(hex_id).expect("--channel-id must be valid hex");
+        let arr: [u8; 32] = bytes.try_into().expect("--channel-id must be 64 hex chars (32 bytes)");
+        ChannelId::from(arr)
+    } else {
+        config::load_or_create_channel_id(&data_dir.join("channel.id"))
+    };
 
     eprintln!("Channel ID: {}", hex::encode(my_channel_id.as_ref()));
 
