@@ -3,19 +3,19 @@
 A terminal-based bulletin board built on the [Logos blockchain](https://github.com/logos-blockchain/logos-blockchain) Zone SDK. Each user has a **channel** — a persistent, append-only feed of messages anchored on-chain. You can publish to your own channel and subscribe to others.
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ ● Zone Board  |  Your channel: 4eb089c5…                     │
-├────────────────┬─────────────────────────────────────────────┤
-│ Channels       │  [you] 4eb089c5…                            │
-│                │                                             │
-│ ▶[you] 4eb…⟳  │  12:00:01  Hello world                      │
-│  b3f371…       │  12:01:33  Another message                  │
-│                │                                             │
-├────────────────┴─────────────────────────────────────────────┤
-│ published: a3f1b2… (pending finalization)                    │
-│ > type a message here▌                                       │
-│ ↑↓ select channel  Enter publish  /sub <channel-id>  /quit   │
-└──────────────────────────────────────────────────────────────┘
++--------------------------------------------------------------+
+| * Zone Board  |  Your channel: vpavlin  (6c6f676f733a796f6c) |
++----------------+---------------------------------------------+
+| Channels       |  [you] vpavlin                              |
+|                |                                             |
+| *[you] vpavlin |  12:00:01  Hello world                      |
+|  alice         |  12:01:33  Another message                  |
+|                |                                             |
++----------------+---------------------------------------------+
+| published: a3f1b2... (pending finalization)                  |
+| > type a message here                                        |
+| up/down select  Enter publish  /sub <name|hex>  /quit        |
++--------------------------------------------------------------+
 ```
 
 ---
@@ -24,7 +24,8 @@ A terminal-based bulletin board built on the [Logos blockchain](https://github.c
 
 This project is a **workshop example** showing how to build a real application on top of a live decentralized blockchain using the Zone SDK. It covers:
 
-- **Identity** — generating and persisting an Ed25519 key pair, deriving a stable channel address from the public key
+- **Identity** — generating and persisting an Ed25519 key pair, with a channel address decoupled from the signing key
+- **Human-readable channels** — encoding UTF-8 names into 32-byte channel IDs using a namespace prefix
 - **Publishing** — using `ZoneSequencer` to submit inscriptions with crash-resilient checkpointing
 - **Reading** — backfilling historical messages with `zone_messages_in_blocks`, then following new blocks live via SSE
 - **Race conditions** — how to prevent missing messages between a historical scan and a live stream
@@ -43,13 +44,19 @@ Your identity has two independent components:
 
 On first run a random channel ID is generated and saved. The two are intentionally decoupled: the SDK only requires that the signer is *authorized* for the channel, not that the channel ID equals the public key. This means you can rotate your signing key without changing your channel address, or share a channel between multiple signers.
 
-You can also specify a channel ID explicitly:
+#### Human-readable channel names
+
+The `--channel` flag accepts either a hex ID or a plain name. Names are stored as `logos:yolo:<name>` zero-padded to 32 bytes, giving all named channels a shared namespace:
 
 ```sh
-cargo run -- --node-url http://... --channel-id <64-hex-chars>
-# or
-CHANNEL_ID=<64-hex-chars> cargo run -- --node-url http://...
+# Pick a name (max 21 chars)
+cargo run -- --node-url http://... --channel vpavlin
+
+# Use a raw 32-byte hex ID
+cargo run -- --node-url http://... --channel 6c6f676f733a796f6c6f...
 ```
+
+The UI automatically decodes the `logos:yolo:` prefix so only `vpavlin` is shown in the sidebar and title bar. The full hex is shown in the title bar alongside the name so you can share it.
 
 ### Publishing a message
 
@@ -60,22 +67,26 @@ Messages are published via `ZoneSequencer`, the SDK component responsible for cr
 3. Submits it to the node over HTTP
 4. Saves a **checkpoint** (`sequencer.checkpoint`) after each successful submission so it can resume without re-sending on restart
 
-Publishing is asynchronous — the sequencer runs as a background task. When you press Enter, the message appears immediately in the UI as "pending…" and is confirmed once the live block stream delivers it back from the chain.
+Publishing is asynchronous — the sequencer runs as a background task. When you press Enter, the message appears immediately in the UI as "pending..." and is confirmed once the live block stream delivers it back from the chain.
 
 ```
 User presses Enter
-  → message added to UI as pending
-  → tokio::spawn: wait_ready → publish_message → update status
-                                         ↓
+  -> message added to UI as pending
+  -> tokio::spawn: wait_ready -> publish_message -> update status
+                                         |
                           live block stream delivers block
-                          → pending entry confirmed in-place
+                          -> pending entry confirmed in-place
 ```
 
 #### Sequencer readiness
 
 The sequencer has its own internal block stream subscription and only becomes "ready" after it receives its first block event from the node. This is separate from the indexer's connection dot in the title bar. `wait_ready()` blocks until this happens, ensuring the sequencer has an up-to-date view of the chain before submitting.
 
-Both `wait_ready()` and `publish_message()` are wrapped in a single timeout so a stuck sequencer (e.g. from a stale checkpoint) never hangs the UI indefinitely.
+Both `wait_ready()` and `publish_message()` are wrapped in a single timeout so a stuck sequencer never hangs the UI indefinitely.
+
+#### Checkpoint safety
+
+The checkpoint is tied to a specific channel ID via a `.channel` sidecar file. If you switch channels (e.g. change `--channel`), the old checkpoint is automatically discarded on startup instead of causing the sequencer to loop trying to resubmit stale transactions for the wrong channel.
 
 ### Reading messages — the gap problem
 
@@ -91,21 +102,21 @@ The naive approach — backfill first, then subscribe to the live stream — has
 zone-board solves this by starting the live stream **first**, before fetching any history:
 
 ```
-time ──────────────────────────────────────────────>
+time ------------------------------------------------->
 
   live stream subscription started
-         │
-         │   backfill running (genesis → tip)
-         │   ╔═══════════════════════════╗
-         │   ║  batch 0–10000            ║
-         │   ║  batch 10001–20000  ...   ║
-         │   ╚═══════════════════════════╝
-         │                              │
-         │   gap-fill (tip → new tip)   │
-         │   ╔═══════════╗              │
-         │   ╚═══════════╝              │
-         │                              │
-         └──────────────────────────────┴──> both active
+         |
+         |   backfill running (genesis -> tip)
+         |   +---------------------------+
+         |   |  batch 0-10000           |
+         |   |  batch 10001-20000  ...  |
+         |   +---------------------------+
+         |                              |
+         |   gap-fill (tip -> new tip)  |
+         |   +-----------+              |
+         |   +-----------+              |
+         |                              |
+         +------------------------------+-> both active
 ```
 
 Any block that arrives via the live stream while the backfill is running is buffered in a `tokio::mpsc` channel and processed by the main loop. Duplicates (same block delivered by both sources) are deduplicated by block ID.
@@ -123,7 +134,8 @@ The node API returns messages in slot ranges. Using 10,000-slot batches keeps th
 | `sequencer.key` | 32-byte Ed25519 private key | No (gitignored) |
 | `channel.id` | 32-byte channel address | No (gitignored) |
 | `sequencer.checkpoint` | Last confirmed message ID + pending tx list | No (gitignored) |
-| `subscriptions.json` | Hex channel IDs to re-subscribe on startup | No (gitignored) |
+| `sequencer.checkpoint.channel` | Channel ID the checkpoint belongs to | No (gitignored) |
+| `subscriptions.json` | Channel IDs to re-subscribe on startup | No (gitignored) |
 | `zone-board.log` | Warnings and errors (tail with `tail -f`) | No (gitignored) |
 
 These files are created automatically on first run and are ignored by git.
@@ -150,13 +162,17 @@ The `vendor/core2` directory contains a vendored copy of the `core2` crate (whic
 ### Run
 
 ```sh
+# With a human-readable channel name
+cargo run --release -- --node-url http://<node-host>:<port> --channel yourname
+
+# With just a node URL (generates a random channel ID on first run)
 cargo run --release -- --node-url http://<node-host>:<port>
 ```
 
-Or set the environment variable:
+Or via environment variables:
 
 ```sh
-NODE_URL=http://localhost:8080 cargo run --release
+NODE_URL=http://localhost:8080 CHANNEL=yourname cargo run --release
 ```
 
 By default all data files are written to the current directory. Use `--data-dir /path/to/dir` (or `DATA_DIR=...`) to store them elsewhere.
@@ -165,9 +181,10 @@ By default all data files are written to the current directory. Use `--data-dir 
 
 | Key / Command | Action |
 |---------------|--------|
-| `↑` / `↓` | Move between channels |
+| `up` / `down` | Move between channels |
 | `Enter` | Publish typed message to your channel |
-| `/sub <hex-channel-id>` | Subscribe to another channel |
+| `/sub <name>` | Subscribe by human-readable name (e.g. `/sub alice`) |
+| `/sub <hex>` | Subscribe by 64-char hex channel ID |
 | `/unsub` | Unsubscribe the currently selected channel |
 | `/quit` or `/q` | Exit |
 | `Ctrl+C` | Exit |
@@ -201,7 +218,7 @@ vendor/
 **`App::spawn_indexer_for(channel_id)`** — starts two concurrent tasks per channel:
 
 1. A **live stream task** that subscribes to `block_stream()` immediately and sends matching blocks to the main loop via `mpsc::Sender`. Reconnects automatically on disconnect.
-2. A **backfill task** that scans historical slots in 10,000-slot batches, then runs a gap-fill pass, then exits. Progress is reported via the `status_tx` channel and reflected in the `⟳` sync indicator.
+2. A **backfill task** that scans historical slots in 10,000-slot batches, then runs a gap-fill pass, then exits. Progress is reported via the `status_tx` channel and reflected in the sync indicator.
 
 **`App::publish_input(text)`** — spawns a task that calls `handle.wait_ready()` followed by `handle.publish_message()`, both wrapped in a single 120-second timeout. The message appears immediately in the UI as pending and is confirmed when the indexer delivers the on-chain block.
 
