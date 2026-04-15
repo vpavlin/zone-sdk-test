@@ -7,7 +7,7 @@ use std::{
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt as _;
-use lb_core::mantle::ops::{Op, channel::ChannelId};
+use lb_core::mantle::ops::channel::ChannelId;
 use lb_zone_sdk::{
     Slot, ZoneBlock, ZoneMessage,
     adapter::{Node, NodeHttpClient},
@@ -198,103 +198,25 @@ impl App {
         let (live_cancel, cancel_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
-            // Start block_stream immediately so no live blocks are missed while
-            // the historical backfill is running.
-            let live_msg_tx = msg_tx.clone();
-            let live_node = node.clone();
-            let live_conn_tx = conn_tx.clone();
-            let mut cancel_rx_live = cancel_rx.clone();
-
-            tokio::spawn(async move {
-                loop {
-                    // Check for cancellation before connecting.
-                    if *cancel_rx_live.borrow() {
-                        return;
-                    }
-
-                    let stream_result = tokio::select! {
-                        biased;
-                        _ = cancel_rx_live.changed() => return,
-                        r = live_node.block_stream() => r,
-                    };
-
-                    match stream_result {
-                        Ok(stream) => {
-                            let _ = live_conn_tx.send(true).await;
-                            let mut stream = Box::pin(stream);
-                            loop {
-                                let event = tokio::select! {
-                                    biased;
-                                    _ = cancel_rx_live.changed() => return,
-                                    ev = stream.next() => ev,
-                                };
-                                match event {
-                                    Some(event) => {
-                                        for tx in &event.block.transactions {
-                                            for op in &tx.mantle_tx.ops {
-                                                if let Op::ChannelInscribe(inscribe) = op {
-                                                    if inscribe.channel_id == channel_id {
-                                                        let block = ZoneBlock {
-                                                            id: inscribe.id(),
-                                                            data: inscribe.inscription.clone(),
-                                                        };
-                                                        if live_msg_tx
-                                                            .send((channel_id, block))
-                                                            .await
-                                                            .is_err()
-                                                        {
-                                                            // Receiver dropped — app is shutting down.
-                                                            return;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None => {
-                                        tracing::warn!(
-                                            "block stream ended for {}, reconnecting…",
-                                            hex::encode(channel_id.as_ref())
-                                        );
-                                        break; // reconnect
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "block_stream failed for {}: {e}",
-                                hex::encode(channel_id.as_ref())
-                            );
-                        }
-                    }
-
-                    let _ = live_conn_tx.send(false).await;
-                    // Sleep with early-exit on cancellation.
-                    tokio::select! {
-                        biased;
-                        _ = cancel_rx_live.changed() => return,
-                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-                    }
-                }
-            });
-
-            // Historical backfill — runs concurrently with the live stream above.
-            // Matches the SDK's built-in ZoneIndexer batch size. Larger batches
-            // risk timing out the node's get_blocks call under load.
+            // The /blocks API (used by zone_messages_in_blocks) only returns
+            // *immutable* (past-LIB) blocks — scanning to the tip slot has no
+            // extra benefit. Use lib_slot as the authoritative endpoint, matching
+            // the SDK's own ZoneIndexer::next_messages() implementation.
             const BATCH: u64 = 100;
 
             let _ = sync_tx.send(SyncUpdate::Start(channel_id));
 
-            // Scan up to the current tip (not just lib) so unfinalized-but-stored
-            // blocks are included.
-            let tip = match node.consensus_info().await {
-                Ok(info) => info.slot,
+            let lib_at_start = match node.consensus_info().await {
+                Ok(info) => {
+                    let _ = conn_tx.send(true).await;
+                    info.lib_slot
+                }
                 Err(e) => {
                     tracing::warn!(
                         "consensus_info failed for {}: {e}",
                         hex::encode(channel_id.as_ref())
                     );
+                    let _ = conn_tx.send(false).await;
                     Slot::genesis()
                 }
             };
@@ -348,34 +270,98 @@ impl App {
                 true
             }
 
-            if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, Slot::genesis(), tip, BATCH).await {
+            // Main backfill: genesis → lib_slot at startup.
+            if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, Slot::genesis(), lib_at_start, BATCH).await {
                 return;
             }
 
-            // Convergent gap-fill: keep scanning forward until the tip stops moving.
-            // This ensures messages published while the main backfill was running are
-            // not missed, even if more blocks arrive during the gap-fill itself.
-            let mut prev_tip = tip;
+            // Convergent gap-fill: keep scanning forward until lib_slot stabilises.
+            // Catches blocks that became immutable while the main backfill was running.
+            let mut prev_lib = lib_at_start;
             loop {
-                let new_tip = match node.consensus_info().await {
-                    Ok(info) => info.slot,
+                let new_lib = match node.consensus_info().await {
+                    Ok(info) => info.lib_slot,
                     Err(_) => break,
                 };
-                if new_tip <= prev_tip {
-                    break; // caught up
+                if new_lib <= prev_lib {
+                    break; // fully caught up
                 }
-                let from = Slot::from(prev_tip.into_inner().saturating_add(1));
-                if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, from, new_tip, BATCH).await {
+                let from = Slot::from(prev_lib.into_inner().saturating_add(1));
+                if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, from, new_lib, BATCH).await {
                     return;
                 }
-                prev_tip = new_tip;
+                prev_lib = new_lib;
             }
 
             let _ = sync_tx.send(SyncUpdate::Done(channel_id));
-            // The live block_stream sub-task continues running indefinitely —
-            // it will exit on its own when cancel_rx detects the sender was dropped
-            // or when live_cancel.send(true) is called from resync/unsub.
-            drop(cancel_rx); // release our reference to cancel_rx so sub-task can detect drop
+
+            // Live tail: poll lib_slot every 3 s and scan any newly-immutable slots.
+            // This approach (vs. block_stream SSE) never has reconnection gaps — if a
+            // poll fails we simply retry next cycle, and last_lib is not advanced until
+            // the fetch succeeds.
+            let live_msg_tx = msg_tx;
+            let live_node = node;
+            let live_conn_tx = conn_tx;
+            let mut cancel_rx_live = cancel_rx.clone();
+
+            tokio::spawn(async move {
+                let mut last_lib = prev_lib;
+                loop {
+                    // Wait first so we don't immediately re-scan what we just fetched.
+                    tokio::select! {
+                        biased;
+                        _ = cancel_rx_live.changed() => return,
+                        _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                    }
+
+                    if *cancel_rx_live.borrow() {
+                        return;
+                    }
+
+                    match live_node.consensus_info().await {
+                        Ok(info) => {
+                            let _ = live_conn_tx.send(true).await;
+                            if info.lib_slot > last_lib {
+                                let from = Slot::from(last_lib.into_inner().saturating_add(1));
+                                match live_node
+                                    .zone_messages_in_blocks(from, info.lib_slot, channel_id)
+                                    .await
+                                {
+                                    Ok(stream) => {
+                                        futures::pin_mut!(stream);
+                                        while let Some((msg, _slot)) = stream.next().await {
+                                            if let ZoneMessage::Block(block) = msg {
+                                                if live_msg_tx.send((channel_id, block)).await.is_err() {
+                                                    return; // receiver dropped — app shutting down
+                                                }
+                                            }
+                                        }
+                                        last_lib = info.lib_slot;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "live poll zone_messages_in_blocks [{}-{}] failed for {}: {e}",
+                                            from.into_inner(),
+                                            info.lib_slot.into_inner(),
+                                            hex::encode(channel_id.as_ref())
+                                        );
+                                        // last_lib is NOT advanced — will retry next cycle
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "live poll consensus_info failed for {}: {e}",
+                                hex::encode(channel_id.as_ref())
+                            );
+                            let _ = live_conn_tx.send(false).await;
+                        }
+                    }
+                }
+            });
+
+            drop(cancel_rx); // release outer reference; sub-task holds the only receiver
         });
 
         self.indexer_handles.insert(channel_id, IndexerHandles {
