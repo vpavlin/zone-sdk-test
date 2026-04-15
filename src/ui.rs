@@ -128,7 +128,10 @@ fn render_messages(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .map(|m| {
             m.iter()
                 .map(|msg| {
-                    if msg.pending {
+                    if msg.failed {
+                        ListItem::new(format!("  {}  ✗ {} (failed — not sent)", msg.timestamp, msg.text))
+                            .style(Style::default().fg(Color::Red))
+                    } else if msg.pending {
                         ListItem::new(format!("  {}  {} (pending…)", msg.timestamp, msg.text))
                             .style(Style::default().fg(Color::DarkGray))
                     } else {

@@ -51,6 +51,10 @@ pub struct DisplayMessage {
     /// Never written to the cache (always false when loaded).
     #[serde(default)]
     pub pending: bool,
+    /// True if the publish attempt failed (timeout or sequencer error).
+    /// The message will not be confirmed and should be shown as failed.
+    #[serde(default)]
+    pub failed: bool,
     /// On-chain block ID once confirmed; used to deduplicate backfill vs live stream.
     #[serde(with = "block_id_serde")]
     pub block_id: Option<[u8; 32]>,
@@ -114,6 +118,10 @@ pub struct App {
     msg_rx: mpsc::Receiver<(ChannelId, ZoneBlock)>,
     status_rx: mpsc::Receiver<String>,
     status_tx: mpsc::Sender<String>,
+    /// Sends the text of a message whose publish attempt failed, so the UI
+    /// can mark the matching pending entry as failed instead of pending forever.
+    publish_fail_tx: mpsc::Sender<String>,
+    publish_fail_rx: mpsc::Receiver<String>,
     checkpoint_rx: mpsc::Receiver<SequencerCheckpoint>,
     checkpoint_tx: mpsc::Sender<SequencerCheckpoint>,
     /// Signals from indexers: backfill lifecycle + per-channel progress.
@@ -144,6 +152,7 @@ impl App {
     ) -> Self {
         let (msg_tx, msg_rx) = mpsc::channel(1024);
         let (status_tx, status_rx) = mpsc::channel(64);
+        let (publish_fail_tx, publish_fail_rx) = mpsc::channel(64);
         let (checkpoint_tx, checkpoint_rx) = mpsc::channel(64);
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (conn_tx, conn_rx) = mpsc::channel(64);
@@ -169,6 +178,8 @@ impl App {
             msg_rx,
             status_tx,
             status_rx,
+            publish_fail_tx,
+            publish_fail_rx,
             checkpoint_tx,
             checkpoint_rx,
             sync_tx,
@@ -589,6 +600,7 @@ impl App {
             text: pending.text,
             timestamp: pending.timestamp,
             pending: true,
+            failed: false,
             block_id: None,
         };
         let bucket = self.messages.entry(pending.channel_id).or_default();
@@ -610,14 +622,15 @@ impl App {
 
         let mut handle = self.handle.clone();
         let status_tx = self.status_tx.clone();
+        let fail_tx = self.publish_fail_tx.clone();
         let checkpoint_tx = self.checkpoint_tx.clone();
 
         tokio::spawn(async move {
             // Wrap both wait_ready AND publish_message in the same timeout so a
             // stuck sequencer (e.g. stale checkpoint retry loop) doesn't hang forever.
-            let result = tokio::time::timeout(PUBLISH_TIMEOUT, async move {
+            let result = tokio::time::timeout(PUBLISH_TIMEOUT, async {
                 handle.wait_ready().await;
-                handle.publish_message(text.into_bytes()).await
+                handle.publish_message(text.as_bytes().to_vec()).await
             })
             .await;
 
@@ -631,21 +644,25 @@ impl App {
                         ))
                         .await;
                     let _ = checkpoint_tx.send(r.checkpoint).await;
+                    // Success: the indexer will confirm the pending entry when the
+                    // block arrives via block_stream or the polling loop.
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("publish error: {e}");
                     let _ = status_tx
                         .send(format!("publish error: {e} — check zone-board.log"))
                         .await;
+                    let _ = fail_tx.send(text).await;
                 }
                 Err(_) => {
                     tracing::warn!("publish timed out after {PUBLISH_TIMEOUT:?}");
                     let _ = status_tx
                         .send(format!(
-                            "publish timed out after {}s — sequencer may have a stale checkpoint; delete sequencer.checkpoint and restart",
+                            "publish timed out after {}s — delete sequencer.checkpoint and restart",
                             PUBLISH_TIMEOUT.as_secs()
                         ))
                         .await;
+                    let _ = fail_tx.send(text).await;
                 }
             }
         });
@@ -700,6 +717,8 @@ impl App {
                     self.resync_selected();
                 } else if input == "/quit" || input == "/q" {
                     self.should_quit = true;
+                } else if input.starts_with('/') {
+                    self.status = format!("unknown command: {input}");
                 } else if !input.is_empty() {
                     self.publish_input(input).await;
                 }
@@ -754,19 +773,33 @@ impl App {
             }
 
             // Confirm a matching pending message in-place rather than adding a duplicate.
-            let confirmed_pending = bucket.iter_mut().find(|m| m.pending && m.text == text);
+            let confirmed_pending = bucket
+                .iter_mut()
+                .find(|m| (m.pending || m.failed) && m.text == text);
             if let Some(m) = confirmed_pending {
                 m.pending = false;
+                m.failed = false;
                 m.block_id = Some(block_id);
             } else {
                 bucket.push_back(DisplayMessage {
                     text,
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                     pending: false,
+                    failed: false,
                     block_id: Some(block_id),
                 });
                 while bucket.len() > MAX_MESSAGES_PER_CHANNEL {
                     bucket.pop_front();
+                }
+            }
+        }
+
+        // Failed publish notifications — mark the matching pending entry as failed.
+        while let Ok(text) = self.publish_fail_rx.try_recv() {
+            if let Some(bucket) = self.messages.get_mut(&self.my_channel_id) {
+                if let Some(m) = bucket.iter_mut().find(|m| m.pending && m.text == text) {
+                    m.pending = false;
+                    m.failed = true;
                 }
             }
         }
