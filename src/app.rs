@@ -106,8 +106,9 @@ pub struct App {
     checkpoint_rx: mpsc::Receiver<SequencerCheckpoint>,
     checkpoint_tx: mpsc::Sender<SequencerCheckpoint>,
     /// Signals from indexers: backfill lifecycle + per-channel progress.
-    sync_tx: mpsc::Sender<SyncUpdate>,
-    sync_rx: mpsc::Receiver<SyncUpdate>,
+    /// Unbounded so backfill tasks never block waiting for the UI to drain.
+    sync_tx: mpsc::UnboundedSender<SyncUpdate>,
+    sync_rx: mpsc::UnboundedReceiver<SyncUpdate>,
     /// Signals from indexers: true = block stream connected, false = disconnected.
     conn_tx: mpsc::Sender<bool>,
     conn_rx: mpsc::Receiver<bool>,
@@ -133,7 +134,7 @@ impl App {
         let (msg_tx, msg_rx) = mpsc::channel(1024);
         let (status_tx, status_rx) = mpsc::channel(64);
         let (checkpoint_tx, checkpoint_rx) = mpsc::channel(64);
-        let (sync_tx, sync_rx) = mpsc::channel(64);
+        let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (conn_tx, conn_rx) = mpsc::channel(64);
 
         let own_label = format!("[you] {}", config::channel_id_label(my_channel_id));
@@ -236,7 +237,7 @@ impl App {
             // risk timing out the node's get_blocks call under load.
             const BATCH: u64 = 100;
 
-            let _ = sync_tx.send(SyncUpdate::Start(channel_id)).await;
+            let _ = sync_tx.send(SyncUpdate::Start(channel_id));
 
             // Scan up to the current tip (not just lib) so unfinalized-but-stored
             // blocks are included. A gap-fill pass afterwards catches anything that
@@ -255,7 +256,7 @@ impl App {
             async fn fetch_range(
                 node: &NodeHttpClient,
                 msg_tx: &mpsc::Sender<(ChannelId, ZoneBlock)>,
-                sync_tx: &mpsc::Sender<SyncUpdate>,
+                sync_tx: &mpsc::UnboundedSender<SyncUpdate>,
                 channel_id: ChannelId,
                 from: Slot,
                 to: Slot,
@@ -288,13 +289,11 @@ impl App {
                         }
                     }
                     cur = Slot::from(end.into_inner().saturating_add(1));
-                    let _ = sync_tx
-                        .send(SyncUpdate::Progress {
-                            channel_id,
-                            current: cur.into_inner().min(to.into_inner()),
-                            target: to.into_inner(),
-                        })
-                        .await;
+                    let _ = sync_tx.send(SyncUpdate::Progress {
+                        channel_id,
+                        current: cur.into_inner().min(to.into_inner()),
+                        target: to.into_inner(),
+                    });
                 }
                 true
             }
@@ -319,7 +318,7 @@ impl App {
                 }
             }
 
-            let _ = sync_tx.send(SyncUpdate::Done(channel_id)).await;
+            let _ = sync_tx.send(SyncUpdate::Done(channel_id));
             // The live block_stream sub-task continues running indefinitely.
         });
 
