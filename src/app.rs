@@ -208,6 +208,7 @@ impl App {
                                                     .await
                                                     .is_err()
                                                 {
+                                                    // Receiver dropped — app is shutting down.
                                                     return;
                                                 }
                                             }
@@ -275,20 +276,24 @@ impl App {
                             while let Some((msg, _slot)) = stream.next().await {
                                 if let ZoneMessage::Block(block) = msg {
                                     if msg_tx.send((channel_id, block)).await.is_err() {
-                                        return false;
+                                        return false; // receiver dropped — app shutting down
                                     }
                                 }
                             }
+                            // Advance only on success so a failed batch is retried.
+                            cur = Slot::from(end.into_inner().saturating_add(1));
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "zone_messages_in_blocks failed for {}: {e}",
+                                "zone_messages_in_blocks [{}-{}] failed for {}: {e}, retrying…",
+                                cur.into_inner(),
+                                end.into_inner(),
                                 hex::encode(channel_id.as_ref())
                             );
-                            break;
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            // cur is NOT advanced — the same batch will be retried
                         }
                     }
-                    cur = Slot::from(end.into_inner().saturating_add(1));
                     let _ = sync_tx.send(SyncUpdate::Progress {
                         channel_id,
                         current: cur.into_inner().min(to.into_inner()),
@@ -341,6 +346,26 @@ impl App {
         self.spawn_indexer_for(channel_id);
         self.save_subscriptions();
         self.status = format!("subscribed to {}…", &hex::encode(channel_id.as_ref())[..12]);
+    }
+
+    /// Re-sync the currently selected channel from scratch.
+    pub fn resync_selected(&mut self) {
+        let id = self.channels[self.selected].id;
+        // Abort the existing indexer task
+        if let Some(handle) = self.indexer_handles.remove(&id) {
+            handle.abort();
+        }
+        // Clear messages and seen state so the channel starts fresh
+        self.messages.remove(&id);
+        self.seen_count.remove(&id);
+        self.syncing.remove(&id);
+        self.sync_progress.remove(&id);
+        // Remove the on-disk cache so the full backfill runs again
+        let cache = self.cache_path(id);
+        let _ = std::fs::remove_file(&cache);
+        // Restart the indexer
+        self.spawn_indexer_for(id);
+        self.status = format!("resyncing {}…", self.channels[self.selected].label);
     }
 
     /// Remove the currently selected (non-own) channel.
@@ -523,6 +548,8 @@ impl App {
                     self.subscribe(channel_id);
                 } else if input == "/unsub" {
                     self.unsubscribe_selected();
+                } else if input == "/resync" {
+                    self.resync_selected();
                 } else if input == "/quit" || input == "/q" {
                     self.should_quit = true;
                 } else if !input.is_empty() {
