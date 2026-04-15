@@ -206,10 +206,15 @@ impl App {
 
             let _ = sync_tx.send(SyncUpdate::Start(channel_id));
 
-            let lib_at_start = match node.consensus_info().await {
+            // Use consensus tip (not lib_slot) as the backfill target.
+            // On this testnet lib_slot may be stuck near genesis while the canonical
+            // chain has thousands of slots — scanning genesis→lib_slot would return
+            // nothing. zone_messages_in_blocks (ScanImmutableBlockIds server-side)
+            // scans the canonical chain and works fine with the tip as the upper bound.
+            let tip_at_start = match node.consensus_info().await {
                 Ok(info) => {
                     let _ = conn_tx.send(true).await;
-                    info.lib_slot
+                    info.slot
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -270,27 +275,27 @@ impl App {
                 true
             }
 
-            // Main backfill: genesis → lib_slot at startup.
-            if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, Slot::genesis(), lib_at_start, BATCH).await {
+            // Main backfill: genesis → canonical tip at startup.
+            if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, Slot::genesis(), tip_at_start, BATCH).await {
                 return;
             }
 
-            // Convergent gap-fill: keep scanning forward until lib_slot stabilises.
-            // Catches blocks that became immutable while the main backfill was running.
-            let mut prev_lib = lib_at_start;
+            // Convergent gap-fill: keep scanning forward until the tip stabilises.
+            // Catches blocks added to the canonical chain while the main backfill ran.
+            let mut prev_tip = tip_at_start;
             loop {
-                let new_lib = match node.consensus_info().await {
-                    Ok(info) => info.lib_slot,
+                let new_tip = match node.consensus_info().await {
+                    Ok(info) => info.slot,
                     Err(_) => break,
                 };
-                if new_lib <= prev_lib {
-                    break; // fully caught up
+                if new_tip <= prev_tip {
+                    break; // caught up
                 }
-                let from = Slot::from(prev_lib.into_inner().saturating_add(1));
-                if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, from, new_lib, BATCH).await {
+                let from = Slot::from(prev_tip.into_inner().saturating_add(1));
+                if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, from, new_tip, BATCH).await {
                     return;
                 }
-                prev_lib = new_lib;
+                prev_tip = new_tip;
             }
 
             let _ = sync_tx.send(SyncUpdate::Done(channel_id));
@@ -401,7 +406,7 @@ impl App {
                 let mut cancel_rx_poll = cancel_rx.clone();
 
                 tokio::spawn(async move {
-                    let mut last_lib = prev_lib;
+                    let mut last_lib = prev_tip;
                     loop {
                         // Sleep before each poll so we don't re-scan what we just fetched.
                         tokio::select! {
@@ -417,10 +422,10 @@ impl App {
                         match poll_node.consensus_info().await {
                             Ok(info) => {
                                 let _ = poll_conn_tx.send(true).await;
-                                if info.lib_slot > last_lib {
+                                if info.slot > last_lib {
                                     let from = Slot::from(last_lib.into_inner().saturating_add(1));
                                     match poll_node
-                                        .zone_messages_in_blocks(from, info.lib_slot, channel_id)
+                                        .zone_messages_in_blocks(from, info.slot, channel_id)
                                         .await
                                     {
                                         Ok(stream) => {
@@ -436,13 +441,13 @@ impl App {
                                                     }
                                                 }
                                             }
-                                            last_lib = info.lib_slot;
+                                            last_lib = info.slot;
                                         }
                                         Err(e) => {
                                             tracing::warn!(
-                                                "lib poll zone_messages_in_blocks [{}-{}] failed for {}: {e}",
+                                                "tip poll zone_messages_in_blocks [{}-{}] failed for {}: {e}",
                                                 from.into_inner(),
-                                                info.lib_slot.into_inner(),
+                                                info.slot.into_inner(),
                                                 hex::encode(channel_id.as_ref())
                                             );
                                             // last_lib NOT advanced — retried next cycle
