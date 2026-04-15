@@ -3,15 +3,11 @@ use std::{io, path::PathBuf};
 use clap::Parser;
 use crossterm::{
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use lb_core::mantle::ops::channel::ChannelId;
-use lb_zone_sdk::{
-    CommonHttpClient,
-    adapter::NodeHttpClient,
-    sequencer::ZoneSequencer,
-};
-use ratatui::{Terminal, backend::CrosstermBackend};
+use lb_zone_sdk::{adapter::NodeHttpClient, sequencer::ZoneSequencer, CommonHttpClient};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use reqwest::Url;
 
 mod app;
@@ -92,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node = NodeHttpClient::new(CommonHttpClient::new(None), node_url.clone());
 
     // Initialise the zone sequencer and spawn it as a background task
-    let (sequencer, handle) = ZoneSequencer::init(my_channel_id, key, node.clone(), checkpoint);
+    let (sequencer, mut handle) = ZoneSequencer::init(my_channel_id, key, node.clone(), checkpoint);
     sequencer.spawn();
 
     // Build the application state
