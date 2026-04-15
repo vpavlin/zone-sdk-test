@@ -295,73 +295,174 @@ impl App {
 
             let _ = sync_tx.send(SyncUpdate::Done(channel_id));
 
-            // Live tail: poll lib_slot every 3 s and scan any newly-immutable slots.
-            // This approach (vs. block_stream SSE) never has reconnection gaps — if a
-            // poll fails we simply retry next cycle, and last_lib is not advanced until
-            // the fetch succeeds.
-            let live_msg_tx = msg_tx;
-            let live_node = node;
-            let live_conn_tx = conn_tx;
-            let mut cancel_rx_live = cancel_rx.clone();
+            // ── Live delivery ────────────────────────────────────────────────────
+            //
+            // Two concurrent sub-tasks, both sharing the cancel_rx watch channel:
+            //
+            // 1. block_stream() sub-task — delivers canonical (tip-level) blocks the
+            //    moment they arrive, before they are finalized. This is the fast path
+            //    and is what makes pending messages confirm quickly. It reconnects
+            //    automatically on disconnect, but reconnection introduces a gap.
+            //
+            // 2. lib-slot polling sub-task — every 3 s, checks consensus_info().
+            //    lib_slot and scans any newly-immutable slot range via
+            //    zone_messages_in_blocks. This is the reliable backstop: it catches
+            //    anything missed by the stream during a reconnect window, and never
+            //    loses messages because last_lib only advances on success.
+            //
+            // Duplicates (same block delivered by both) are dropped by the block_id
+            // dedup in drain_background_channels.
 
-            tokio::spawn(async move {
-                let mut last_lib = prev_lib;
-                loop {
-                    // Wait first so we don't immediately re-scan what we just fetched.
-                    tokio::select! {
-                        biased;
-                        _ = cancel_rx_live.changed() => return,
-                        _ = tokio::time::sleep(Duration::from_secs(3)) => {}
-                    }
+            // ── Sub-task 1: block_stream (canonical / low-latency) ───────────────
+            {
+                use lb_core::mantle::ops::Op;
+                let stream_msg_tx = msg_tx.clone();
+                let stream_node = node.clone();
+                let stream_conn_tx = conn_tx.clone();
+                let mut cancel_rx_stream = cancel_rx.clone();
 
-                    if *cancel_rx_live.borrow() {
-                        return;
-                    }
+                tokio::spawn(async move {
+                    loop {
+                        if *cancel_rx_stream.borrow() {
+                            return;
+                        }
 
-                    match live_node.consensus_info().await {
-                        Ok(info) => {
-                            let _ = live_conn_tx.send(true).await;
-                            if info.lib_slot > last_lib {
-                                let from = Slot::from(last_lib.into_inner().saturating_add(1));
-                                match live_node
-                                    .zone_messages_in_blocks(from, info.lib_slot, channel_id)
-                                    .await
-                                {
-                                    Ok(stream) => {
-                                        futures::pin_mut!(stream);
-                                        while let Some((msg, _slot)) = stream.next().await {
-                                            if let ZoneMessage::Block(block) = msg {
-                                                if live_msg_tx.send((channel_id, block)).await.is_err() {
-                                                    return; // receiver dropped — app shutting down
+                        let stream_result = tokio::select! {
+                            biased;
+                            _ = cancel_rx_stream.changed() => return,
+                            r = stream_node.block_stream() => r,
+                        };
+
+                        match stream_result {
+                            Ok(stream) => {
+                                let _ = stream_conn_tx.send(true).await;
+                                let mut stream = Box::pin(stream);
+                                loop {
+                                    let event = tokio::select! {
+                                        biased;
+                                        _ = cancel_rx_stream.changed() => return,
+                                        ev = stream.next() => ev,
+                                    };
+                                    match event {
+                                        Some(event) => {
+                                            for tx in &event.block.transactions {
+                                                for op in &tx.mantle_tx.ops {
+                                                    if let Op::ChannelInscribe(inscribe) = op {
+                                                        if inscribe.channel_id == channel_id {
+                                                            let block = ZoneBlock {
+                                                                id: inscribe.id(),
+                                                                data: inscribe.inscription.clone(),
+                                                            };
+                                                            if stream_msg_tx
+                                                                .send((channel_id, block))
+                                                                .await
+                                                                .is_err()
+                                                            {
+                                                                return;
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
-                                        last_lib = info.lib_slot;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "live poll zone_messages_in_blocks [{}-{}] failed for {}: {e}",
-                                            from.into_inner(),
-                                            info.lib_slot.into_inner(),
-                                            hex::encode(channel_id.as_ref())
-                                        );
-                                        // last_lib is NOT advanced — will retry next cycle
+                                        None => {
+                                            tracing::warn!(
+                                                "block stream ended for {}, reconnecting…",
+                                                hex::encode(channel_id.as_ref())
+                                            );
+                                            break;
+                                        }
                                     }
                                 }
                             }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "block_stream connect failed for {}: {e}",
+                                    hex::encode(channel_id.as_ref())
+                                );
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                "live poll consensus_info failed for {}: {e}",
-                                hex::encode(channel_id.as_ref())
-                            );
-                            let _ = live_conn_tx.send(false).await;
+
+                        let _ = stream_conn_tx.send(false).await;
+                        tokio::select! {
+                            biased;
+                            _ = cancel_rx_stream.changed() => return,
+                            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
                         }
                     }
-                }
-            });
+                });
+            }
 
-            drop(cancel_rx); // release outer reference; sub-task holds the only receiver
+            // ── Sub-task 2: lib-slot polling (finalized / reliable) ──────────────
+            {
+                let poll_msg_tx = msg_tx;
+                let poll_node = node;
+                let poll_conn_tx = conn_tx;
+                let mut cancel_rx_poll = cancel_rx.clone();
+
+                tokio::spawn(async move {
+                    let mut last_lib = prev_lib;
+                    loop {
+                        // Sleep before each poll so we don't re-scan what we just fetched.
+                        tokio::select! {
+                            biased;
+                            _ = cancel_rx_poll.changed() => return,
+                            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                        }
+
+                        if *cancel_rx_poll.borrow() {
+                            return;
+                        }
+
+                        match poll_node.consensus_info().await {
+                            Ok(info) => {
+                                let _ = poll_conn_tx.send(true).await;
+                                if info.lib_slot > last_lib {
+                                    let from = Slot::from(last_lib.into_inner().saturating_add(1));
+                                    match poll_node
+                                        .zone_messages_in_blocks(from, info.lib_slot, channel_id)
+                                        .await
+                                    {
+                                        Ok(stream) => {
+                                            futures::pin_mut!(stream);
+                                            while let Some((msg, _slot)) = stream.next().await {
+                                                if let ZoneMessage::Block(block) = msg {
+                                                    if poll_msg_tx
+                                                        .send((channel_id, block))
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            last_lib = info.lib_slot;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "lib poll zone_messages_in_blocks [{}-{}] failed for {}: {e}",
+                                                from.into_inner(),
+                                                info.lib_slot.into_inner(),
+                                                hex::encode(channel_id.as_ref())
+                                            );
+                                            // last_lib NOT advanced — retried next cycle
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "lib poll consensus_info failed for {}: {e}",
+                                    hex::encode(channel_id.as_ref())
+                                );
+                                let _ = poll_conn_tx.send(false).await;
+                            }
+                        }
+                    }
+                });
+            }
+
+            drop(cancel_rx); // release outer reference; both sub-tasks hold their own clones
         });
 
         self.indexer_handles.insert(channel_id, IndexerHandles {
