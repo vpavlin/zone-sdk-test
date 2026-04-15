@@ -77,6 +77,17 @@ mod block_id_serde {
     }
 }
 
+/// Handles for a running indexer: the outer backfill task plus a cancel signal
+/// for the inner live-stream sub-task (which is spawned independently and is
+/// NOT automatically stopped when the outer `JoinHandle` is aborted).
+struct IndexerHandles {
+    /// The outer task running the historical backfill + progress signals.
+    outer: tokio::task::JoinHandle<()>,
+    /// Sending `true` stops the live-stream sub-task gracefully.
+    /// Dropping the sender also terminates the receiver, stopping the stream.
+    live_cancel: tokio::sync::watch::Sender<bool>,
+}
+
 /// A message that was published locally and is awaiting on-chain confirmation.
 struct PendingMessage {
     channel_id: ChannelId,
@@ -113,7 +124,7 @@ pub struct App {
     conn_tx: mpsc::Sender<bool>,
     conn_rx: mpsc::Receiver<bool>,
 
-    indexer_handles: HashMap<ChannelId, tokio::task::JoinHandle<()>>,
+    indexer_handles: HashMap<ChannelId, IndexerHandles>,
     pub should_quit: bool,
     /// Channels currently running the historical backfill.
     pub syncing: HashSet<ChannelId>,
@@ -182,44 +193,73 @@ impl App {
         let sync_tx = self.sync_tx.clone();
         let conn_tx = self.conn_tx.clone();
 
+        // Cancellation signal for the live-stream sub-task.
+        // Sending `true` (or simply dropping the sender) stops the inner task.
+        let (live_cancel, cancel_rx) = tokio::sync::watch::channel(false);
+
         let handle = tokio::spawn(async move {
             // Start block_stream immediately so no live blocks are missed while
             // the historical backfill is running.
             let live_msg_tx = msg_tx.clone();
             let live_node = node.clone();
             let live_conn_tx = conn_tx.clone();
+            let mut cancel_rx_live = cancel_rx.clone();
+
             tokio::spawn(async move {
                 loop {
-                    match live_node.block_stream().await {
+                    // Check for cancellation before connecting.
+                    if *cancel_rx_live.borrow() {
+                        return;
+                    }
+
+                    let stream_result = tokio::select! {
+                        biased;
+                        _ = cancel_rx_live.changed() => return,
+                        r = live_node.block_stream() => r,
+                    };
+
+                    match stream_result {
                         Ok(stream) => {
                             let _ = live_conn_tx.send(true).await;
                             let mut stream = Box::pin(stream);
-                            while let Some(event) = stream.next().await {
-                                for tx in &event.block.transactions {
-                                    for op in &tx.mantle_tx.ops {
-                                        if let Op::ChannelInscribe(inscribe) = op {
-                                            if inscribe.channel_id == channel_id {
-                                                let block = ZoneBlock {
-                                                    id: inscribe.id(),
-                                                    data: inscribe.inscription.clone(),
-                                                };
-                                                if live_msg_tx
-                                                    .send((channel_id, block))
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    // Receiver dropped — app is shutting down.
-                                                    return;
+                            loop {
+                                let event = tokio::select! {
+                                    biased;
+                                    _ = cancel_rx_live.changed() => return,
+                                    ev = stream.next() => ev,
+                                };
+                                match event {
+                                    Some(event) => {
+                                        for tx in &event.block.transactions {
+                                            for op in &tx.mantle_tx.ops {
+                                                if let Op::ChannelInscribe(inscribe) = op {
+                                                    if inscribe.channel_id == channel_id {
+                                                        let block = ZoneBlock {
+                                                            id: inscribe.id(),
+                                                            data: inscribe.inscription.clone(),
+                                                        };
+                                                        if live_msg_tx
+                                                            .send((channel_id, block))
+                                                            .await
+                                                            .is_err()
+                                                        {
+                                                            // Receiver dropped — app is shutting down.
+                                                            return;
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+                                    None => {
+                                        tracing::warn!(
+                                            "block stream ended for {}, reconnecting…",
+                                            hex::encode(channel_id.as_ref())
+                                        );
+                                        break; // reconnect
+                                    }
                                 }
                             }
-                            tracing::warn!(
-                                "block stream ended for {}, reconnecting…",
-                                hex::encode(channel_id.as_ref())
-                            );
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -228,8 +268,14 @@ impl App {
                             );
                         }
                     }
+
                     let _ = live_conn_tx.send(false).await;
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    // Sleep with early-exit on cancellation.
+                    tokio::select! {
+                        biased;
+                        _ = cancel_rx_live.changed() => return,
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    }
                 }
             });
 
@@ -241,8 +287,7 @@ impl App {
             let _ = sync_tx.send(SyncUpdate::Start(channel_id));
 
             // Scan up to the current tip (not just lib) so unfinalized-but-stored
-            // blocks are included. A gap-fill pass afterwards catches anything that
-            // arrived while the main backfill was running.
+            // blocks are included.
             let tip = match node.consensus_info().await {
                 Ok(info) => info.slot,
                 Err(e) => {
@@ -307,27 +352,36 @@ impl App {
                 return;
             }
 
-            // Gap-fill: catch blocks that arrived while the main backfill was running.
-            if let Ok(info) = node.consensus_info().await {
-                if info.slot > tip {
-                    fetch_range(
-                        &node,
-                        &msg_tx,
-                        &sync_tx,
-                        channel_id,
-                        Slot::from(tip.into_inner().saturating_add(1)),
-                        info.slot,
-                        BATCH,
-                    )
-                    .await;
+            // Convergent gap-fill: keep scanning forward until the tip stops moving.
+            // This ensures messages published while the main backfill was running are
+            // not missed, even if more blocks arrive during the gap-fill itself.
+            let mut prev_tip = tip;
+            loop {
+                let new_tip = match node.consensus_info().await {
+                    Ok(info) => info.slot,
+                    Err(_) => break,
+                };
+                if new_tip <= prev_tip {
+                    break; // caught up
                 }
+                let from = Slot::from(prev_tip.into_inner().saturating_add(1));
+                if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, from, new_tip, BATCH).await {
+                    return;
+                }
+                prev_tip = new_tip;
             }
 
             let _ = sync_tx.send(SyncUpdate::Done(channel_id));
-            // The live block_stream sub-task continues running indefinitely.
+            // The live block_stream sub-task continues running indefinitely —
+            // it will exit on its own when cancel_rx detects the sender was dropped
+            // or when live_cancel.send(true) is called from resync/unsub.
+            drop(cancel_rx); // release our reference to cancel_rx so sub-task can detect drop
         });
 
-        self.indexer_handles.insert(channel_id, handle);
+        self.indexer_handles.insert(channel_id, IndexerHandles {
+            outer: handle,
+            live_cancel,
+        });
     }
 
     /// Add a channel to the subscription list and start polling it.
@@ -351,9 +405,10 @@ impl App {
     /// Re-sync the currently selected channel from scratch.
     pub fn resync_selected(&mut self) {
         let id = self.channels[self.selected].id;
-        // Abort the existing indexer task
-        if let Some(handle) = self.indexer_handles.remove(&id) {
-            handle.abort();
+        // Stop both the outer backfill task and the inner live-stream sub-task.
+        if let Some(handles) = self.indexer_handles.remove(&id) {
+            let _ = handles.live_cancel.send(true); // signal inner task to stop
+            handles.outer.abort();                  // kill outer backfill task
         }
         // Clear messages and seen state so the channel starts fresh
         self.messages.remove(&id);
@@ -376,8 +431,9 @@ impl App {
             return;
         }
         let entry = self.channels.remove(idx);
-        if let Some(handle) = self.indexer_handles.remove(&entry.id) {
-            handle.abort();
+        if let Some(handles) = self.indexer_handles.remove(&entry.id) {
+            let _ = handles.live_cancel.send(true);
+            handles.outer.abort();
         }
         self.messages.remove(&entry.id);
         if self.selected >= self.channels.len() {
