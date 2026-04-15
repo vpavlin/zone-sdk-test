@@ -653,6 +653,11 @@ impl App {
                     // Only messages arriving via the live stream after this point are unread.
                     let total = self.messages.get(&id).map(|m| m.len()).unwrap_or(0);
                     self.seen_count.entry(id).or_insert(total);
+                    let label = self.channels.iter()
+                        .find(|c| c.id == id)
+                        .map(|c| c.label.as_str())
+                        .unwrap_or("channel");
+                    self.status = format!("sync done: {} — {total} message(s)", label);
                 }
             }
         }
