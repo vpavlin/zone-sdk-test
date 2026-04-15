@@ -3,19 +3,20 @@
 A terminal-based bulletin board built on the [Logos blockchain](https://github.com/logos-blockchain/logos-blockchain) Zone SDK. Each user has a **channel** — a persistent, append-only feed of messages anchored on-chain. You can publish to your own channel and subscribe to others.
 
 ```
-+--------------------------------------------------------------+
-| * Zone Board  |  Your channel: vpavlin  (6c6f676f733a796f6c) |
-+----------------+---------------------------------------------+
-| Channels       |  [you] vpavlin                              |
-|                |                                             |
-| *[you] vpavlin |  12:00:01  Hello world                      |
-|  alice         |  12:01:33  Another message                  |
-|                |                                             |
-+----------------+---------------------------------------------+
-| published: a3f1b2... (pending finalization)                  |
-| > type a message here                                        |
-| up/down select  Enter publish  /sub <name|hex>  /quit        |
-+--------------------------------------------------------------+
++---------------------------------------------------------------------+
+| ● Zone Board  |  Your channel: vpavlin  (6c6f676f733a796f6c)        |
+|               ⟳ [████████████░░░░░░░░]  62%                         |
++----------------+----------------------------------------------------+
+| Channels       |  [you] vpavlin                                     |
+|                |                                                    |
+| ▶[you] vpavlin |  12:00:01  Hello world                             |
+|  alice  [3]    |  12:01:33  Another message                         |
+|                |                                                    |
++----------------+----------------------------------------------------+
+| published: a3f1b2... (pending finalization)                         |
+| > type a message here▌                                              |
+| ↑↓ select channel  Enter publish  /sub <name|hex>  /unsub  /resync  /quit |
++---------------------------------------------------------------------+
 ```
 
 ---
@@ -27,8 +28,8 @@ This project is a **workshop example** showing how to build a real application o
 - **Identity** — generating and persisting an Ed25519 key pair, with a channel address decoupled from the signing key
 - **Human-readable channels** — encoding UTF-8 names into 32-byte channel IDs using a namespace prefix
 - **Publishing** — using `ZoneSequencer` to submit inscriptions with crash-resilient checkpointing
-- **Reading** — backfilling historical messages with `zone_messages_in_blocks`, then following new blocks live via SSE
-- **Race conditions** — how to prevent missing messages between a historical scan and a live stream
+- **Reading** — backfilling historical messages with `zone_messages_in_blocks`, then tailing new finalized blocks by polling `consensus_info().lib_slot`
+- **Reliability** — why SSE reconnection gaps cause silent message loss, and how lib-slot polling eliminates that class of bug
 - **TUI** — building a responsive terminal UI with `ratatui` driven by a `tokio` async event loop
 
 ---
@@ -58,6 +59,8 @@ cargo run -- --node-url http://... --channel 6c6f676f733a796f6c6f...
 
 The UI automatically decodes the `logos:yolo:` prefix so only `vpavlin` is shown in the sidebar and title bar. The full hex is shown in the title bar alongside the name so you can share it.
 
+---
+
 ### Publishing a message
 
 Messages are published via `ZoneSequencer`, the SDK component responsible for creating and submitting on-chain transactions. The sequencer:
@@ -67,65 +70,109 @@ Messages are published via `ZoneSequencer`, the SDK component responsible for cr
 3. Submits it to the node over HTTP
 4. Saves a **checkpoint** (`sequencer.checkpoint`) after each successful submission so it can resume without re-sending on restart
 
-Publishing is asynchronous — the sequencer runs as a background task. When you press Enter, the message appears immediately in the UI as "pending..." and is confirmed once the live block stream delivers it back from the chain.
+Publishing is asynchronous — the sequencer runs as a background task. When you press Enter, the message appears immediately in the UI as "pending…" and is confirmed once the polling loop delivers the finalized block back from the chain (within ~3 seconds).
 
 ```
 User presses Enter
-  -> message added to UI as pending
-  -> tokio::spawn: wait_ready -> publish_message -> update status
-                                         |
-                          live block stream delivers block
-                          -> pending entry confirmed in-place
+  → message added to UI as pending
+  → tokio::spawn: wait_ready() → publish_message() → update status
+                                          |
+                          node finalizes the block (LIB advances)
+                          → live poll delivers block via zone_messages_in_blocks
+                          → pending entry confirmed in-place
 ```
 
 #### Sequencer readiness
 
-The sequencer has its own internal block stream subscription and only becomes "ready" after it receives its first block event from the node. This is separate from the indexer's connection dot in the title bar. `wait_ready()` blocks until this happens, ensuring the sequencer has an up-to-date view of the chain before submitting.
+The sequencer has its own internal block stream subscription and only becomes "ready" after it receives its first block event from the node. `wait_ready()` blocks until this happens, ensuring the sequencer has an up-to-date view of the chain before submitting.
 
-Both `wait_ready()` and `publish_message()` are wrapped in a single timeout so a stuck sequencer never hangs the UI indefinitely.
+Both `wait_ready()` and `publish_message()` are wrapped in a single 120-second timeout so a stuck sequencer never hangs the UI indefinitely.
 
 #### Checkpoint safety
 
 The checkpoint is tied to a specific channel ID via a `.channel` sidecar file. If you switch channels (e.g. change `--channel`), the old checkpoint is automatically discarded on startup instead of causing the sequencer to loop trying to resubmit stale transactions for the wrong channel.
 
-### Reading messages — the gap problem
+---
 
-Reading messages from a channel requires two data sources:
+### Reading messages — why this is tricky
 
-| Source | What it provides |
-|--------|-----------------|
-| `zone_messages_in_blocks(from, to, channel)` | Historical messages in a slot range (HTTP batch) |
-| `block_stream()` | All new blocks as they arrive (SSE) |
+#### The /blocks API only returns finalized blocks
 
-The naive approach — backfill first, then subscribe to the live stream — has a **race condition**: blocks that arrive while the backfill is running will be missed.
+The node's `/blocks` endpoint (used internally by `zone_messages_in_blocks`) runs a server-side scan over the **immutable** (past-LIB) chain. It ignores any block that has not yet passed the finality threshold, regardless of what slot range you request.
 
-zone-board solves this by starting the live stream **first**, before fetching any history:
+This means the "tip slot" from `consensus_info().slot` is not the right backfill target — slots above the LIB return empty results. The correct endpoint is `consensus_info().lib_slot`, which is exactly what the SDK's own `ZoneIndexer` uses.
+
+#### The SSE reconnect gap problem
+
+An earlier version of this app used `block_stream()` (a Server-Sent Events stream) for live message delivery. The stream delivers canonical blocks as soon as they appear, which gives low latency. But there is a catch:
 
 ```
-time ------------------------------------------------->
+time ────────────────────────────────────────────────────────>
 
-  live stream subscription started
-         |
-         |   backfill running (genesis -> tip)
-         |   +---------------------------+
-         |   |  batch 0-10000           |
-         |   |  batch 10001-20000  ...  |
-         |   +---------------------------+
-         |                              |
-         |   gap-fill (tip -> new tip)  |
-         |   +-----------+              |
-         |   +-----------+              |
-         |                              |
-         +------------------------------+-> both active
+  SSE stream active           stream drops     stream reconnects
+  ─────────────────────────── X               ───────────────>
+                               └─── gap ──────┘
+                                    blocks here
+                                    are LOST FOREVER
 ```
 
-Any block that arrives via the live stream while the backfill is running is buffered in a `tokio::mpsc` channel and processed by the main loop. Duplicates (same block delivered by both sources) are deduplicated by block ID.
+When the SSE stream reconnects, it starts from the *current* head. Any blocks that arrived during the gap are skipped. Once those blocks become finalized (past LIB), the backfill has already completed and won't re-scan them. They are silently lost.
 
-A **gap-fill** pass runs after the main backfill: it fetches from the original `tip` to the current tip, covering the window during which the backfill was running.
+#### The fix: lib-slot polling
 
-### Historical backfill efficiency
+Instead of the SSE stream, zone-board polls `consensus_info().lib_slot` every 3 seconds. When the LIB slot advances, it scans the new range with `zone_messages_in_blocks`:
 
-The node API returns messages in slot ranges. Using 10,000-slot batches keeps the number of HTTP requests small — around 11 requests to cover 110,000 slots — instead of 1,000+ requests with a 100-slot batch.
+```
+time ─────────────────────────────────────────────────────────>
+
+  backfill: genesis ──────────────────────> lib_at_start
+  gap-fill: lib_at_start ──> lib (repeated until stable)
+
+  live poll:   t+3s     t+6s     t+9s     t+12s ...
+               │        │        │        │
+               └─scan───┴─scan───┴─scan───┴─scan→
+               last_lib         last_lib advances on success only
+```
+
+If a poll request fails, `last_lib` is not advanced — the same range is retried on the next cycle. This guarantees that every finalized message is eventually delivered, regardless of transient network errors.
+
+The trade-off compared to SSE: messages appear within ~3 seconds of finalization rather than instantly. For a bulletin board this is entirely acceptable.
+
+#### Deduplication
+
+Both the backfill and the live poll can deliver the same block (e.g. a block finalized during the gap-fill). Each `DisplayMessage` stores the on-chain `block_id` (32-byte hash). Incoming blocks are skipped if a matching `block_id` is already in the channel's message list.
+
+#### Local message cache
+
+To avoid re-scanning the full chain history on every startup, confirmed messages are saved to `cache/<channel_hex>.json` on quit. On the next run the cache is loaded before the indexer starts, so messages appear immediately. The backfill still runs to catch anything published since the last session, but it's usually fast.
+
+#### /resync
+
+`/resync` wipes the cache and restarts the indexer for the selected channel from genesis. Useful if the cache is suspected stale or messages appear out of order.
+
+---
+
+### Sync progress indicator
+
+While a channel is backfilling, the title bar shows a progress bar:
+
+```
+⟳ [████████████░░░░░░░░]  62%
+```
+
+Progress is computed as `current_slot / lib_slot_at_start × 100`. When multiple channels are syncing simultaneously, the bar shows the percentage of the *slowest* channel so it doesn't vanish before everything is done.
+
+### Unread message badges
+
+Channels with messages you haven't seen yet show a yellow badge in the sidebar:
+
+```
+  alice  [3]
+```
+
+The count resets when you navigate to that channel. Messages that are already present when the sync completes (historical messages) are never counted as unread.
+
+---
 
 ### Persistence
 
@@ -136,6 +183,7 @@ The node API returns messages in slot ranges. Using 10,000-slot batches keeps th
 | `sequencer.checkpoint` | Last confirmed message ID + pending tx list | No (gitignored) |
 | `sequencer.checkpoint.channel` | Channel ID the checkpoint belongs to | No (gitignored) |
 | `subscriptions.json` | Channel IDs to re-subscribe on startup | No (gitignored) |
+| `cache/<hex>.json` | Cached confirmed messages per channel | No (gitignored) |
 | `zone-board.log` | Warnings and errors (tail with `tail -f`) | No (gitignored) |
 
 These files are created automatically on first run and are ignored by git.
@@ -146,7 +194,7 @@ These files are created automatically on first run and are ignored by git.
 
 ### Prerequisites
 
-- Rust (toolchain pinned to 1.85 via `rust-toolchain.toml`)
+- Rust (toolchain pinned to 1.93 via the release workflow; any recent stable works locally)
 - Access to a running Logos blockchain node (URL required)
 
 ### Build
@@ -159,20 +207,24 @@ cargo build --release
 
 The `vendor/core2` directory contains a vendored copy of the `core2` crate (which is yanked on crates.io but required transitively by the SDK). The `[patch.crates-io]` entry in `Cargo.toml` wires this up automatically — no extra steps needed.
 
+### Download a pre-built binary
+
+Pre-built binaries for Linux (x86\_64, aarch64) and macOS (arm64, x86\_64) are attached to each [GitHub release](https://github.com/vpavlin/zone-sdk-test/releases).
+
 ### Run
 
 ```sh
 # With a human-readable channel name
-cargo run --release -- --node-url http://<node-host>:<port> --channel yourname
+./zone-board --node-url http://<node-host>:<port> --channel yourname
 
 # With just a node URL (generates a random channel ID on first run)
-cargo run --release -- --node-url http://<node-host>:<port>
+./zone-board --node-url http://<node-host>:<port>
 ```
 
 Or via environment variables:
 
 ```sh
-NODE_URL=http://localhost:8080 CHANNEL=yourname cargo run --release
+NODE_URL=http://localhost:8080 CHANNEL=yourname ./zone-board
 ```
 
 By default all data files are written to the current directory. Use `--data-dir /path/to/dir` (or `DATA_DIR=...`) to store them elsewhere.
@@ -181,11 +233,12 @@ By default all data files are written to the current directory. Use `--data-dir 
 
 | Key / Command | Action |
 |---------------|--------|
-| `up` / `down` | Move between channels |
+| `↑` / `↓` | Move between channels |
 | `Enter` | Publish typed message to your channel |
 | `/sub <name>` | Subscribe by human-readable name (e.g. `/sub alice`) |
 | `/sub <hex>` | Subscribe by 64-char hex channel ID |
 | `/unsub` | Unsubscribe the currently selected channel |
+| `/resync` | Wipe cache and re-scan the selected channel from genesis |
 | `/quit` or `/q` | Exit |
 | `Ctrl+C` | Exit |
 
@@ -208,21 +261,24 @@ src/
 ├── main.rs     clap args, startup sequence, terminal setup
 ├── app.rs      App state, event loop, sequencer + indexer logic
 ├── ui.rs       ratatui layout and rendering
-└── config.rs   key/checkpoint/subscription persistence
+└── config.rs   key/checkpoint/subscription/cache persistence
 vendor/
 └── core2/      vendored yanked crate required by the SDK
 ```
 
 ### `app.rs` — the heart of the app
 
-**`App::spawn_indexer_for(channel_id)`** — starts two concurrent tasks per channel:
+**`App::spawn_indexer_for(channel_id)`** — starts an indexer for a channel in two phases:
 
-1. A **live stream task** that subscribes to `block_stream()` immediately and sends matching blocks to the main loop via `mpsc::Sender`. Reconnects automatically on disconnect.
-2. A **backfill task** that scans historical slots in 10,000-slot batches, then runs a gap-fill pass, then exits. Progress is reported via the `status_tx` channel and reflected in the sync indicator.
+1. **Backfill task** (outer `tokio::spawn`): scans `zone_messages_in_blocks` from genesis to the current `lib_slot` in 100-slot batches. After the main scan, a convergent gap-fill loop re-checks `lib_slot` until it stops moving, catching any blocks that became immutable while the backfill was running. Emits `SyncUpdate` progress events for the progress bar.
 
-**`App::publish_input(text)`** — spawns a task that calls `handle.wait_ready()` followed by `handle.publish_message()`, both wrapped in a single 120-second timeout. The message appears immediately in the UI as pending and is confirmed when the indexer delivers the on-chain block.
+2. **Live poll sub-task** (inner `tokio::spawn`, started after backfill completes): wakes every 3 seconds, calls `consensus_info()` to check whether `lib_slot` has advanced, and if so fetches the new slot range via `zone_messages_in_blocks`. The `last_lib` cursor only advances on a successful fetch, so transient errors are retried automatically.
 
-**`App::drain_background_channels()`** — called every 50 ms from the main loop. Drains all `mpsc` receivers: incoming blocks (with dedup), status strings, checkpoints, sync state, and connection state.
+Both tasks share a `tokio::sync::watch` cancellation channel. Calling `live_cancel.send(true)` (from `/resync` or `/unsub`) stops the poll sub-task gracefully; `handle.abort()` kills the outer task.
+
+**`App::publish_input(text)`** — spawns a task that calls `handle.wait_ready()` followed by `handle.publish_message()`, both wrapped in a single 120-second timeout. The message appears immediately in the UI as pending and is confirmed when the live poll delivers the on-chain block.
+
+**`App::drain_background_channels()`** — called every 50 ms from the main loop. Drains all `mpsc` receivers: incoming blocks (with dedup by `block_id`), status strings, checkpoints, sync progress, and connection state.
 
 ---
 
@@ -230,10 +286,10 @@ vendor/
 
 1. **Add timestamps from the block** — the `zone_messages_in_blocks` stream yields `(ZoneMessage, Slot)`. Use the slot number to show a block height instead of the local wall-clock time.
 
-2. **Sender attribution** — the `ChannelInscribe` op includes a `signer` field (the author's channel ID). Display the first 8 hex chars as a "from" prefix on each message.
+2. **Sender attribution** — the `ChannelInscribe` op includes a `signer` field (the author's public key). Display the first 8 hex chars as a "from" prefix on each message.
 
 3. **Channel discovery** — add a `/list` command that fetches the last N blocks and lists all unique channel IDs seen, so users can find channels to subscribe to.
 
 4. **Message search** — add `/find <keyword>` to search the local message cache.
 
-5. **Unread counts** — track the last-seen message index per channel and show a count badge in the channel list.
+5. **Cursor persistence** — save `last_lib` per channel to disk so the live poll resumes from where it left off after a restart, rather than re-running the full backfill each time.
