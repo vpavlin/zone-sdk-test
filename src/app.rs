@@ -474,6 +474,27 @@ impl App {
         }
     }
 
+    /// Overall sync progress across all channels: (min_pct, n_syncing).
+    /// Uses the slowest channel so the indicator doesn't vanish until everyone is done.
+    pub fn global_sync_progress(&self) -> Option<u64> {
+        if self.syncing.is_empty() {
+            return None;
+        }
+        let min_pct = self
+            .syncing
+            .iter()
+            .map(|id| {
+                self.sync_progress
+                    .get(id)
+                    .filter(|&&(_, tgt)| tgt > 0)
+                    .map(|&(cur, tgt)| (cur.saturating_mul(100) / tgt).min(100))
+                    .unwrap_or(0)
+            })
+            .min()
+            .unwrap_or(0);
+        Some(min_pct)
+    }
+
     pub fn unread_count(&self, channel_id: ChannelId) -> usize {
         let total = self.messages.get(&channel_id).map(|m| m.len()).unwrap_or(0);
         let seen = self.seen_count.get(&channel_id).copied().unwrap_or(0);

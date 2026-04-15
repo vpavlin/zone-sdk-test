@@ -33,8 +33,15 @@ fn render_title(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         ("●", Color::Red)
     };
+    let sync_span = app.global_sync_progress().map(|pct| {
+        use ratatui::text::Span;
+        Span::styled(
+            format!("  ⟳ syncing {pct}%"),
+            Style::default().bg(Color::Blue).fg(Color::Yellow),
+        )
+    });
     use ratatui::text::{Line, Span};
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(" {conn_dot} "),
             Style::default().bg(Color::Blue).fg(conn_color),
@@ -43,8 +50,11 @@ fn render_title(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             format!("Zone Board  |  Your channel: {channel_name}  ({})", &channel_hex[..16]),
             Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD),
         ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    ];
+    if let Some(s) = sync_span {
+        spans.push(s);
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_content(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -67,17 +77,7 @@ fn render_channels(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .map(|(i, ch)| {
             let selected = i == app.selected;
             let prefix = if selected { "▶ " } else { "  " };
-            let sync_tag: String = if app.syncing.contains(&ch.id) {
-                match app.sync_progress.get(&ch.id) {
-                    Some(&(cur, tgt)) if tgt > 0 => {
-                        let pct = ((cur.saturating_mul(100)) / tgt).min(100);
-                        format!("⟳{pct}% ")
-                    }
-                    _ => "⟳ ".to_string(),
-                }
-            } else {
-                String::new()
-            };
+            let sync_tag = if app.syncing.contains(&ch.id) { "⟳ " } else { "" };
             let unread = app.unread_count(ch.id);
 
             if unread > 0 && !selected {
