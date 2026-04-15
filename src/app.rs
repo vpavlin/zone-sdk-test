@@ -30,6 +30,17 @@ pub struct ChannelEntry {
     pub is_own: bool,
 }
 
+/// Signals emitted by an indexer's historical backfill task.
+pub enum SyncUpdate {
+    Start(ChannelId),
+    Progress {
+        channel_id: ChannelId,
+        current: u64,
+        target: u64,
+    },
+    Done(ChannelId),
+}
+
 pub struct DisplayMessage {
     pub text: String,
     pub timestamp: String,
@@ -67,9 +78,9 @@ pub struct App {
     status_tx: mpsc::Sender<String>,
     checkpoint_rx: mpsc::Receiver<SequencerCheckpoint>,
     checkpoint_tx: mpsc::Sender<SequencerCheckpoint>,
-    /// Signals from indexers: (channel_id, true) = backfill started, false = done.
-    sync_tx: mpsc::Sender<(ChannelId, bool)>,
-    sync_rx: mpsc::Receiver<(ChannelId, bool)>,
+    /// Signals from indexers: backfill lifecycle + per-channel progress.
+    sync_tx: mpsc::Sender<SyncUpdate>,
+    sync_rx: mpsc::Receiver<SyncUpdate>,
     /// Signals from indexers: true = block stream connected, false = disconnected.
     conn_tx: mpsc::Sender<bool>,
     conn_rx: mpsc::Receiver<bool>,
@@ -78,6 +89,9 @@ pub struct App {
     pub should_quit: bool,
     /// Channels currently running the historical backfill.
     pub syncing: HashSet<ChannelId>,
+    /// Per-channel backfill progress: (current_slot, target_slot).
+    /// Present only while a backfill is running *and* has emitted at least one update.
+    pub sync_progress: HashMap<ChannelId, (u64, u64)>,
     /// Whether at least one block stream is currently live.
     pub node_connected: bool,
 }
@@ -125,6 +139,7 @@ impl App {
             indexer_handles: HashMap::new(),
             should_quit: false,
             syncing: HashSet::new(),
+            sync_progress: HashMap::new(),
             node_connected: false,
         }
     }
@@ -138,7 +153,6 @@ impl App {
         let msg_tx = self.msg_tx.clone();
         let sync_tx = self.sync_tx.clone();
         let conn_tx = self.conn_tx.clone();
-        let status_tx = self.status_tx.clone();
 
         let handle = tokio::spawn(async move {
             // Start block_stream immediately so no live blocks are missed while
@@ -191,10 +205,11 @@ impl App {
             });
 
             // Historical backfill — runs concurrently with the live stream above.
-            // Large batches (10 000 slots) keep the number of HTTP round-trips small.
-            const BATCH: u64 = 10_000;
+            // Matches the SDK's built-in ZoneIndexer batch size. Larger batches
+            // risk timing out the node's get_blocks call under load.
+            const BATCH: u64 = 100;
 
-            let _ = sync_tx.send((channel_id, true)).await;
+            let _ = sync_tx.send(SyncUpdate::Start(channel_id)).await;
 
             // Scan up to the current tip (not just lib) so unfinalized-but-stored
             // blocks are included. A gap-fill pass afterwards catches anything that
@@ -210,17 +225,14 @@ impl App {
                 }
             };
 
-            let ch_short = hex::encode(channel_id.as_ref())[..12].to_string();
-
             async fn fetch_range(
                 node: &NodeHttpClient,
                 msg_tx: &mpsc::Sender<(ChannelId, ZoneBlock)>,
+                sync_tx: &mpsc::Sender<SyncUpdate>,
                 channel_id: ChannelId,
                 from: Slot,
                 to: Slot,
                 batch: u64,
-                status_tx: &mpsc::Sender<String>,
-                ch_short: &str,
             ) -> bool {
                 let mut cur = from;
                 while cur <= to {
@@ -249,30 +261,38 @@ impl App {
                         }
                     }
                     cur = Slot::from(end.into_inner().saturating_add(1));
-                    let _ = status_tx
-                        .send(format!(
-                            "syncing {ch_short}… ({} / {})",
-                            cur.into_inner().min(to.into_inner()),
-                            to.into_inner()
-                        ))
+                    let _ = sync_tx
+                        .send(SyncUpdate::Progress {
+                            channel_id,
+                            current: cur.into_inner().min(to.into_inner()),
+                            target: to.into_inner(),
+                        })
                         .await;
                 }
                 true
             }
 
-            if !fetch_range(&node, &msg_tx, channel_id, Slot::genesis(), tip, BATCH, &status_tx, &ch_short).await {
+            if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, Slot::genesis(), tip, BATCH).await {
                 return;
             }
 
             // Gap-fill: catch blocks that arrived while the main backfill was running.
             if let Ok(info) = node.consensus_info().await {
                 if info.slot > tip {
-                    fetch_range(&node, &msg_tx, channel_id, Slot::from(tip.into_inner().saturating_add(1)), info.slot, BATCH, &status_tx, &ch_short).await;
+                    fetch_range(
+                        &node,
+                        &msg_tx,
+                        &sync_tx,
+                        channel_id,
+                        Slot::from(tip.into_inner().saturating_add(1)),
+                        info.slot,
+                        BATCH,
+                    )
+                    .await;
                 }
             }
 
-            let _ = status_tx.send(format!("sync complete for {ch_short}")).await;
-            let _ = sync_tx.send((channel_id, false)).await;
+            let _ = sync_tx.send(SyncUpdate::Done(channel_id)).await;
             // The live block_stream sub-task continues running indefinitely.
         });
 
@@ -504,12 +524,19 @@ impl App {
             );
         }
 
-        // Backfill progress
-        while let Ok((channel_id, started)) = self.sync_rx.try_recv() {
-            if started {
-                self.syncing.insert(channel_id);
-            } else {
-                self.syncing.remove(&channel_id);
+        // Backfill lifecycle + per-channel progress
+        while let Ok(update) = self.sync_rx.try_recv() {
+            match update {
+                SyncUpdate::Start(id) => {
+                    self.syncing.insert(id);
+                }
+                SyncUpdate::Progress { channel_id, current, target } => {
+                    self.sync_progress.insert(channel_id, (current, target));
+                }
+                SyncUpdate::Done(id) => {
+                    self.syncing.remove(&id);
+                    self.sync_progress.remove(&id);
+                }
             }
         }
 

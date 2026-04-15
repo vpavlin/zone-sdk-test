@@ -67,18 +67,28 @@ fn render_channels(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .map(|(i, ch)| {
             let selected = i == app.selected;
             let prefix = if selected { "▶ " } else { "  " };
-            let sync_tag = if app.syncing.contains(&ch.id) { " ⟳" } else { "" };
+            let sync_tag: String = if app.syncing.contains(&ch.id) {
+                match app.sync_progress.get(&ch.id) {
+                    Some(&(cur, tgt)) if tgt > 0 => {
+                        let pct = ((cur.saturating_mul(100)) / tgt).min(100);
+                        format!("⟳{pct}% ")
+                    }
+                    _ => "⟳ ".to_string(),
+                }
+            } else {
+                String::new()
+            };
             let unread = app.unread_count(ch.id);
 
             if unread > 0 && !selected {
-                let label = format!("{prefix}{}{sync_tag} ", ch.label);
+                let label = format!("{prefix}{sync_tag}{} ", ch.label);
                 let badge = format!("[{unread}]");
                 Line::from(vec![
                     Span::styled(label, Style::default().fg(Color::White)),
                     Span::styled(badge, Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 ]).into()
             } else {
-                let label = format!("{prefix}{}{sync_tag}", ch.label);
+                let label = format!("{prefix}{sync_tag}{}", ch.label);
                 let style = if selected {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                 } else {
