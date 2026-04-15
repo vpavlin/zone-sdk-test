@@ -35,10 +35,16 @@ fn render_title(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
     let sync_span = app.global_sync_progress().map(|pct| {
         use ratatui::text::Span;
-        Span::styled(
-            format!("  ⟳ syncing {pct}%"),
-            Style::default().bg(Color::Blue).fg(Color::Yellow),
-        )
+        const BAR_WIDTH: usize = 20;
+        let filled = (pct as usize * BAR_WIDTH / 100).min(BAR_WIDTH);
+        let empty = BAR_WIDTH - filled;
+        let bar = format!(
+            "  ⟳ [{}{}] {:3}%",
+            "█".repeat(filled),
+            "░".repeat(empty),
+            pct,
+        );
+        Span::styled(bar, Style::default().bg(Color::Blue).fg(Color::Yellow))
     });
     use ratatui::text::{Line, Span};
     let mut spans = vec![
