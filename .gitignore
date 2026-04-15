@@ -6,6 +6,7 @@ sequencer.checkpoint
 channel.id
 subscriptions.json
 zone-board.log
+cache/
 
 # If DATA_DIR is set to a subdirectory, ignore those too
 *.key

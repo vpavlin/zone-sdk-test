@@ -16,6 +16,8 @@ use lb_zone_sdk::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config;
 
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
@@ -41,13 +43,38 @@ pub enum SyncUpdate {
     Done(ChannelId),
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DisplayMessage {
     pub text: String,
     pub timestamp: String,
     /// True while the inscription is pending finalization on-chain.
+    /// Never written to the cache (always false when loaded).
+    #[serde(default)]
     pub pending: bool,
     /// On-chain block ID once confirmed; used to deduplicate backfill vs live stream.
+    #[serde(with = "block_id_serde")]
     pub block_id: Option<[u8; 32]>,
+}
+
+mod block_id_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<[u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
+        v.as_ref().map(hex::encode).serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[u8; 32]>, D::Error> {
+        let opt: Option<String> = Option::deserialize(d)?;
+        match opt {
+            None => Ok(None),
+            Some(h) => {
+                let bytes = hex::decode(&h).map_err(serde::de::Error::custom)?;
+                let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                    serde::de::Error::custom("block_id must be 32 bytes")
+                })?;
+                Ok(Some(arr))
+            }
+        }
+    }
 }
 
 /// A message that was published locally and is awaiting on-chain confirmation.
@@ -311,6 +338,7 @@ impl App {
             label,
             is_own: false,
         });
+        self.load_cache_for(channel_id);
         self.spawn_indexer_for(channel_id);
         self.save_subscriptions();
         self.status = format!("subscribed to {}…", &hex::encode(channel_id.as_ref())[..12]);
@@ -333,6 +361,44 @@ impl App {
         }
         self.save_subscriptions();
         self.status = format!("unsubscribed from {}", entry.label);
+    }
+
+    fn cache_path(&self, channel_id: ChannelId) -> std::path::PathBuf {
+        let dir = self.data_dir.join("cache");
+        std::fs::create_dir_all(&dir).ok();
+        dir.join(format!("{}.json", hex::encode(channel_id.as_ref())))
+    }
+
+    /// Load cached messages for a channel from disk into the in-memory store.
+    pub fn load_cache_for(&mut self, channel_id: ChannelId) {
+        let path = self.cache_path(channel_id);
+        if !path.exists() {
+            return;
+        }
+        let Ok(data) = std::fs::read(&path) else { return };
+        let Ok(msgs): Result<VecDeque<DisplayMessage>, _> = serde_json::from_slice(&data) else {
+            return;
+        };
+        let count = msgs.len();
+        self.messages.insert(channel_id, msgs);
+        // Pre-seed seen_count so cached messages never show as unread
+        self.seen_count.insert(channel_id, count);
+    }
+
+    /// Save all confirmed messages for every channel to disk.
+    fn save_cache(&self) {
+        for ch in &self.channels {
+            let Some(msgs) = self.messages.get(&ch.id) else { continue };
+            let confirmed: VecDeque<&DisplayMessage> =
+                msgs.iter().filter(|m| !m.pending && m.block_id.is_some()).collect();
+            if confirmed.is_empty() {
+                continue;
+            }
+            let path = self.cache_path(ch.id);
+            if let Ok(data) = serde_json::to_vec(&confirmed) {
+                std::fs::write(&path, data).ok();
+            }
+        }
     }
 
     fn save_subscriptions(&self) {
@@ -557,6 +623,10 @@ impl App {
                 SyncUpdate::Done(id) => {
                     self.syncing.remove(&id);
                     self.sync_progress.remove(&id);
+                    // All messages present at sync completion are historical — not "new".
+                    // Only messages arriving via the live stream after this point are unread.
+                    let total = self.messages.get(&id).map(|m| m.len()).unwrap_or(0);
+                    self.seen_count.entry(id).or_insert(total);
                 }
             }
         }
@@ -591,6 +661,7 @@ impl App {
                 break;
             }
         }
+        self.save_cache();
         Ok(())
     }
 }

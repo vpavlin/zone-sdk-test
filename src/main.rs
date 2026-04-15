@@ -88,12 +88,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node = NodeHttpClient::new(CommonHttpClient::new(None), node_url.clone());
 
     // Initialise the zone sequencer and spawn it as a background task
-    let (sequencer, mut handle) = ZoneSequencer::init(my_channel_id, key, node.clone(), checkpoint);
+    let (sequencer, handle) = ZoneSequencer::init(my_channel_id, key, node.clone(), checkpoint);
     sequencer.spawn();
 
     // Build the application state
     let mut app = App::new(my_channel_id, handle, node, data_dir.clone());
 
+    // Load cached messages for own channel before starting the indexer
+    app.load_cache_for(my_channel_id);
     // Start an indexer on our own channel so our published messages appear on-screen
     app.spawn_indexer_for(my_channel_id);
 
