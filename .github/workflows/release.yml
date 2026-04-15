@@ -50,8 +50,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # The logos-blockchain-pol build script requires the circuits directory.
-      # Download the matching release from the logos-blockchain releases page.
+      # The logos-blockchain-pol build script requires the circuits directory at compile time.
       - name: Download ZK circuits
         shell: bash
         run: |
@@ -62,8 +61,9 @@ jobs:
           mkdir -p "${DEST}"
           echo "Downloading circuits from ${URL}"
           curl -fL "${URL}" | tar -xz -C "${DEST}" --strip-components=1
-          echo "Circuits installed to ${DEST}"
-          cat "${DEST}/VERSION" || true
+          echo "Circuits version: $(cat ${DEST}/VERSION)"
+          # Expose the path as a step output for later steps
+          echo "CIRCUITS_DIR=${DEST}" >> "${GITHUB_ENV}"
 
       - name: Install musl-tools (x86_64 Linux)
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -75,15 +75,20 @@ jobs:
         with:
           tool: cross
 
-      - name: Build
+      - name: Build (native)
+        if: matrix.cross == false
+        run: cargo build --release --target ${{ matrix.target }}
         env:
-          LOGOS_BLOCKCHAIN_CIRCUITS: ${{ env.HOME }}/.logos-blockchain-circuits
-        run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            LOGOS_BLOCKCHAIN_CIRCUITS="${HOME}/.logos-blockchain-circuits" cross build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+          LOGOS_BLOCKCHAIN_CIRCUITS: ${{ env.CIRCUITS_DIR }}
+
+      - name: Build (cross / aarch64)
+        if: matrix.cross == true
+        # cross runs inside Docker; mount the circuits dir and pass the env var in.
+        env:
+          CROSS_CONTAINER_OPTS: >-
+            -v ${{ env.CIRCUITS_DIR }}:/logos-blockchain-circuits
+            -e LOGOS_BLOCKCHAIN_CIRCUITS=/logos-blockchain-circuits
+        run: cross build --release --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
