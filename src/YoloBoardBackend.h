@@ -7,6 +7,7 @@
 #include <QVariantMap>
 #include <QTimer>
 #include <QMap>
+#include <QSettings>
 
 // Direct Rust FFI — used in standalone mode (no LogosAPI)
 extern "C" {
@@ -83,6 +84,8 @@ private:
     void fetchAndMergeMessages(const QString& channelId);
     void setStatus(const QString& msg);
     void initZoneSequencer();
+    void loadSettings();
+    void saveSettings();
 
     LogosAPI*         m_logosAPI = nullptr;
     LogosAPIClient*   m_zoneClient = nullptr;

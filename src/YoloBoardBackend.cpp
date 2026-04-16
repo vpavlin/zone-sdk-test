@@ -50,6 +50,26 @@ YoloBoardBackend::YoloBoardBackend(LogosAPI* logosAPI, QObject* parent)
     } else {
         setStatus("No Logos API — standalone mode");
     }
+
+    loadSettings();
+}
+
+void YoloBoardBackend::loadSettings() {
+    QSettings s;
+    QString key  = s.value("signingKey").toString();
+    QString node = s.value("nodeUrl", m_nodeUrl).toString();
+    if (!node.isEmpty())
+        m_nodeUrl = node;
+    if (!key.isEmpty()) {
+        m_signingKey = key;
+        initZoneSequencer();
+    }
+}
+
+void YoloBoardBackend::saveSettings() {
+    QSettings s;
+    s.setValue("signingKey", m_signingKey);
+    s.setValue("nodeUrl",    m_nodeUrl);
 }
 
 YoloBoardBackend::~YoloBoardBackend() = default;
@@ -118,6 +138,7 @@ void YoloBoardBackend::setNodeUrl(const QString& url) {
     if (m_nodeUrl == url) return;
     m_nodeUrl = url;
     emit nodeUrlChanged();
+    saveSettings();
     if (m_zoneClient) {
         invokeZone("set_node_url", {url});
     }
@@ -125,6 +146,7 @@ void YoloBoardBackend::setNodeUrl(const QString& url) {
 
 void YoloBoardBackend::setSigningKey(const QString& hex) {
     m_signingKey = hex;
+    saveSettings();
     initZoneSequencer();
 }
 
