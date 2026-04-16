@@ -102,13 +102,13 @@
             installPhase = ''
               runHook preInstall
               mkdir -p $out/lib
-              cp libyolo_board_plugin.so $out/lib/
+              cp libyolo_board_plugin.so $out/lib/yolo_board.so
               cp ${rustLib}/lib/libzone_sequencer_rs.so $out/lib/
               runHook postInstall
             '';
             postFixup = ''
               patchelf --set-rpath "$out/lib:${logosLiblogos}/lib:${pkgs.lib.makeLibraryPath buildInputs}" \
-                $out/lib/libyolo_board_plugin.so
+                $out/lib/yolo_board.so
             '';
             dontWrapQtApps = true;
           };
@@ -183,10 +183,10 @@
           } ''
             lgx create yolo-board
             mkdir -p variant-files
-            cp ${plugin}/lib/libyolo_board_plugin.so variant-files/
+            cp ${plugin}/lib/yolo_board.so variant-files/
             cp ${plugin}/lib/libzone_sequencer_rs.so variant-files/
-            lgx add yolo-board.lgx --variant linux-x86_64-dev --files ./variant-files --main libyolo_board_plugin.so -y
-            lgx add yolo-board.lgx --variant linux-amd64-dev  --files ./variant-files --main libyolo_board_plugin.so -y
+            lgx add yolo-board.lgx --variant linux-x86_64-dev --files ./variant-files --main yolo_board.so -y
+            lgx add yolo-board.lgx --variant linux-amd64-dev  --files ./variant-files --main yolo_board.so -y
             lgx verify yolo-board.lgx
             ${patchManifest "yolo-board" "${self}/metadata.json"}
             mkdir -p $out
