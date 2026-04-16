@@ -9,6 +9,28 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
+// Derive Ed25519 channel ID (= public key) from a 32-byte hex signing key.
+// Uses OpenSSL EVP so we don't depend on zone_derive_channel_id from the Rust FFI.
+#include <openssl/evp.h>
+#include <cstdlib>
+static QString deriveChannelId(const QString& signingKeyHex) {
+    QByteArray keyBytes = QByteArray::fromHex(signingKeyHex.toLatin1());
+    if (keyBytes.size() != 32) return {};
+
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
+        EVP_PKEY_ED25519, nullptr,
+        reinterpret_cast<const unsigned char*>(keyBytes.constData()), 32);
+    if (!pkey) return {};
+
+    unsigned char pub[32];
+    size_t pubLen = 32;
+    EVP_PKEY_get_raw_public_key(pkey, pub, &pubLen);
+    EVP_PKEY_free(pkey);
+
+    if (pubLen != 32) return {};
+    return QString::fromLatin1(QByteArray(reinterpret_cast<const char*>(pub), 32).toHex());
+}
+
 const char* YoloBoardBackend::kZoneModuleName = "liblogos_zone_sequencer_module";
 const char* YoloBoardBackend::kZoneObjectName = "liblogos_zone_sequencer_module";
 
@@ -62,8 +84,7 @@ void YoloBoardBackend::initZoneSequencer() {
         // Derive channel ID — works in both modes
         QString channelId;
         if (isStandalone()) {
-            char* raw = zone_derive_channel_id(m_signingKey.toUtf8().constData());
-            if (raw) { channelId = QString::fromUtf8(raw); zone_free_string(raw); }
+            channelId = deriveChannelId(m_signingKey);
         } else {
             invokeZone("set_node_url", {m_nodeUrl});
             invokeZone("set_signing_key", {m_signingKey});
@@ -86,7 +107,7 @@ void YoloBoardBackend::initZoneSequencer() {
 
         m_connected = true;
         emit connectedChanged();
-        setStatus((isStandalone() ? "[standalone] " : "") + "Connected to " + m_nodeUrl);
+        setStatus(QString(isStandalone() ? "[standalone] " : "") + "Connected to " + m_nodeUrl);
         m_pollTimer->start();
     }
 }

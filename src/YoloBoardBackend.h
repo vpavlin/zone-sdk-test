@@ -13,7 +13,6 @@ extern "C" {
     char* zone_publish(const char* node_url, const char* signing_key_hex,
                        const char* data, const char* checkpoint_path);
     char* zone_query_channel(const char* node_url, const char* channel_id_hex, int limit);
-    char* zone_derive_channel_id(const char* signing_key_hex);
     void  zone_free_string(char* s);
 }
 

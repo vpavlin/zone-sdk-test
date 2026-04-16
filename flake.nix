@@ -22,7 +22,7 @@
       inputs.logos-liblogos.follows = "logos-liblogos";
     };
     zone-sequencer-rs = {
-      url = "github:vpavlin/zone-sequencer-rs/4a1c4ad";
+      url = "github:vpavlin/zone-sequencer-rs/e951162";
       flake = false;
     };
   };
@@ -117,7 +117,7 @@
             version = "0.1.0";
             src = ./.;
             nativeBuildInputs = [ pkgs.cmake pkgs.ninja pkgs.pkg-config pkgs.patchelf pkgs.qt6.wrapQtAppsHook ];
-            buildInputs = buildInputs ++ [ pkgs.qt6.qtwayland ];
+            buildInputs = buildInputs ++ [ pkgs.qt6.qtwayland pkgs.openssl ];
             cmakeFlags = cmakeFlagsCommon;
             buildPhase = ''
               runHook preBuild
@@ -131,9 +131,15 @@
               cp ${rustLib}/lib/libzone_sequencer_rs.so $out/lib/
               runHook postInstall
             '';
-            postFixup = ''
-              patchelf --set-rpath "$out/lib:${pkgs.lib.makeLibraryPath buildInputs}" \
-                $out/bin/yolo-board
+            # Inject LD_LIBRARY_PATH into the Qt wrapper so that transitive
+            # OpenSSL libs (libssl pulled by ngtcp2 etc.) are always found.
+            # Do NOT patchelf the wrapped binary — CMake generates a complete
+            # RUNPATH covering all Qt/system deps automatically.
+            preFixup = ''
+              qtWrapperArgs+=(
+                --prefix LD_LIBRARY_PATH : "${pkgs.openssl.out}/lib"
+                --prefix LD_LIBRARY_PATH : "$out/lib"
+              )
             '';
           };
 

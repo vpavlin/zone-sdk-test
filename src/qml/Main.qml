@@ -2,8 +2,14 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Rectangle {
+ApplicationWindow {
     id: root
+    visible: true
+    width: 900
+    height: 600
+    minimumWidth: 600
+    minimumHeight: 400
+    title: "Yolo Board"
     color: "#1a1a2e"
 
     // ── Fonts / colours (fallback when Logos.Theme not available) ─────────────
@@ -28,7 +34,7 @@ Rectangle {
         Rectangle {
             Layout.fillWidth: true
             height: 40
-            color: accentColor
+            color: root.accentColor
 
             RowLayout {
                 anchors.fill: parent
@@ -44,7 +50,7 @@ Rectangle {
 
                 Text {
                     text: "Yolo Board"
-                    color: textColor
+                    color: root.textColor
                     font.pixelSize: 15
                     font.bold: true
                 }
@@ -55,13 +61,13 @@ Rectangle {
                     text: backend.ownChannelId.length > 12
                           ? "Channel: " + backend.ownChannelId.substring(0, 12) + "..."
                           : "Not configured"
-                    color: mutedColor
+                    color: root.mutedColor
                     font.pixelSize: 11
                 }
 
                 Text {
                     text: backend.nodeUrl
-                    color: mutedColor
+                    color: root.mutedColor
                     font.pixelSize: 11
                 }
             }
@@ -77,7 +83,7 @@ Rectangle {
             Rectangle {
                 Layout.preferredWidth: 180
                 Layout.fillHeight: true
-                color: panelColor
+                color: root.panelColor
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -86,12 +92,12 @@ Rectangle {
                     Rectangle {
                         Layout.fillWidth: true
                         height: 30
-                        color: accentColor
+                        color: root.accentColor
 
                         Text {
                             anchors.centerIn: parent
                             text: "Channels"
-                            color: textColor
+                            color: root.textColor
                             font.pixelSize: 12
                             font.bold: true
                         }
@@ -108,7 +114,7 @@ Rectangle {
                             width: channelList.width
                             height: 38
                             color: index === backend.currentChannelIndex
-                                   ? highlightColor : "transparent"
+                                   ? root.highlightColor : "transparent"
 
                             MouseArea {
                                 anchors.fill: parent
@@ -127,7 +133,7 @@ Rectangle {
                                           ? modelData.substring(0, 14) + "…"
                                           : modelData
                                     color: index === backend.currentChannelIndex
-                                           ? "white" : textColor
+                                           ? "white" : root.textColor
                                     font.pixelSize: 11
                                     font.family: "monospace"
                                     elide: Text.ElideRight
@@ -155,7 +161,7 @@ Rectangle {
                     Rectangle {
                         Layout.fillWidth: true
                         height: 70
-                        color: accentColor
+                        color: root.accentColor
 
                         ColumnLayout {
                             anchors.fill: parent
@@ -168,7 +174,7 @@ Rectangle {
                                 placeholderText: "Channel ID to subscribe…"
                                 font.pixelSize: 10
                                 font.family: "monospace"
-                                color: textColor
+                                color: root.textColor
                                 background: Rectangle { color: "#0a0a1a"; radius: 3 }
                                 Keys.onReturnPressed: doSubscribe()
                             }
@@ -230,7 +236,7 @@ Rectangle {
                             Rectangle {
                                 visible: isOwn
                                 width: 3; height: parent.height
-                                color: highlightColor
+                                color: root.highlightColor
                                 radius: 1
                             }
 
@@ -240,7 +246,7 @@ Rectangle {
 
                                 Text {
                                     text: (isOwn ? "you" : modelData.channel.substring(0, 8) + "…")
-                                    color: isOwn ? highlightColor : mutedColor
+                                    color: isOwn ? root.highlightColor : root.mutedColor
                                     font.pixelSize: 10
                                 }
 
@@ -248,8 +254,8 @@ Rectangle {
                                     id: msgText
                                     width: parent.width
                                     text: modelData.data || ""
-                                    color: isOwn ? ownMsgColor : otherMsgColor
-                                    font.pixelSize: baseFontPx
+                                    color: isOwn ? root.ownMsgColor : root.otherMsgColor
+                                    font.pixelSize: root.baseFontPx
                                     wrapMode: Text.Wrap
                                 }
                             }
@@ -263,7 +269,7 @@ Rectangle {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 50
-                    color: panelColor
+                    color: root.panelColor
 
                     RowLayout {
                         anchors.fill: parent
@@ -277,9 +283,9 @@ Rectangle {
                             id: composeInput
                             Layout.fillWidth: true
                             placeholderText: "Type a message…"
-                            font.pixelSize: baseFontPx
-                            color: textColor
-                            background: Rectangle { color: accentColor; radius: 4 }
+                            font.pixelSize: root.baseFontPx
+                            color: root.textColor
+                            background: Rectangle { color: root.accentColor; radius: 4 }
                             enabled: backend.connected
                             Keys.onReturnPressed: doPublish()
                         }
@@ -304,7 +310,7 @@ Rectangle {
                         anchors.leftMargin: 8
                         anchors.verticalCenter: parent.verticalCenter
                         text: backend.status
-                        color: mutedColor
+                        color: root.mutedColor
                         font.pixelSize: 10
                     }
                 }
@@ -314,11 +320,11 @@ Rectangle {
 
     // ── Setup dialog ──────────────────────────────────────────────────────────
     Rectangle {
-        visible: showSetup
+        visible: root.showSetup
         anchors.centerIn: parent
         width: 400; height: 260
-        color: panelColor
-        border.color: accentColor
+        color: root.panelColor
+        border.color: root.accentColor
         border.width: 1
         radius: 6
 
@@ -329,14 +335,14 @@ Rectangle {
 
             Text {
                 text: "Yolo Board — Configuration"
-                color: textColor
+                color: root.textColor
                 font.pixelSize: 15
                 font.bold: true
             }
 
             Text {
                 text: "Enter your Ed25519 signing key (64-char hex) and node URL to connect."
-                color: mutedColor
+                color: root.mutedColor
                 font.pixelSize: 11
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
@@ -348,8 +354,8 @@ Rectangle {
                 placeholderText: "Signing key (64-char hex)…"
                 font.family: "monospace"
                 font.pixelSize: 11
-                color: textColor
-                background: Rectangle { color: accentColor; radius: 3 }
+                color: root.textColor
+                background: Rectangle { color: root.accentColor; radius: 3 }
                 echoMode: TextInput.Password
             }
 
@@ -358,9 +364,9 @@ Rectangle {
                 Layout.fillWidth: true
                 placeholderText: "Node URL (e.g. http://localhost:8080)"
                 font.pixelSize: 11
-                color: textColor
+                color: root.textColor
                 text: backend.nodeUrl
-                background: Rectangle { color: accentColor; radius: 3 }
+                background: Rectangle { color: root.accentColor; radius: 3 }
             }
 
             Button {
@@ -371,7 +377,7 @@ Rectangle {
                 onClicked: {
                     backend.setNodeUrl(nodeInput.text)
                     backend.setSigningKey(keyInput.text)
-                    showSetup = false
+                    root.showSetup = false
                 }
             }
         }
@@ -401,4 +407,4 @@ Rectangle {
             messageList.positionViewAtBeginning()
         }
     }
-}
+} // ApplicationWindow

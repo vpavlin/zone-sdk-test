@@ -8,6 +8,9 @@ set(CMAKE_AUTOMOC ON)
 # ── Qt ──────────────────────────────────────────────────────────────────────
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Quick QuickWidgets Qml)
 
+# ── OpenSSL (for Ed25519 channel ID derivation in standalone mode) ───────────
+find_package(OpenSSL REQUIRED)
+
 # ── logos-cpp-sdk ────────────────────────────────────────────────────────────
 if(NOT LOGOS_CPP_SDK_ROOT)
     set(LOGOS_CPP_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../logos-cpp-sdk")
@@ -88,7 +91,7 @@ qt_add_executable(${APP_TARGET}
 )
 
 qt_add_resources(${APP_TARGET} "yolo_board_app_qml"
-    PREFIX "/"
+    PREFIX "/qml"
     BASE "src/qml"
     FILES ${QML_SOURCES}
 )
@@ -106,6 +109,7 @@ target_link_libraries(${APP_TARGET} PRIVATE
     Qt6::Quick
     Qt6::Qml
     zone_sequencer_rs
+    OpenSSL::Crypto
 )
 
 if(APPLE)
