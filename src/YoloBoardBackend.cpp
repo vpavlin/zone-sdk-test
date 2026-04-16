@@ -44,27 +44,29 @@ QVariant YoloBoardBackend::invokeZone(const QString& method, const QVariantList&
     return m_zoneClient->invokeRemoteMethod(kZoneObjectName, method, args);
 }
 
+bool YoloBoardBackend::isStandalone() const {
+    return m_zoneClient == nullptr;
+}
+
 void YoloBoardBackend::initZoneSequencer() {
-    if (!m_zoneClient) return;
-
-    invokeZone("set_node_url", {m_nodeUrl});
-
     if (!m_signingKey.isEmpty()) {
-        invokeZone("set_signing_key", {m_signingKey});
-
-        if (!m_checkpointDir.isEmpty()) {
-            QString ckptPath = m_checkpointDir + "/zone.checkpoint";
-            invokeZone("set_checkpoint_path", {ckptPath});
+        // Derive channel ID — works in both modes
+        QString channelId;
+        if (isStandalone()) {
+            char* raw = zone_derive_channel_id(m_signingKey.toUtf8().constData());
+            if (raw) { channelId = QString::fromUtf8(raw); zone_free_string(raw); }
+        } else {
+            invokeZone("set_node_url", {m_nodeUrl});
+            invokeZone("set_signing_key", {m_signingKey});
+            if (!m_checkpointDir.isEmpty())
+                invokeZone("set_checkpoint_path", {m_checkpointDir + "/zone.checkpoint"});
+            channelId = invokeZone("get_channel_id").toString();
         }
 
-        QVariant result = invokeZone("get_channel_id");
-        QString channelId = result.toString();
         if (!channelId.isEmpty() && !channelId.startsWith("Error:")) {
             m_ownChannelId = channelId;
             emit ownChannelIdChanged();
             qInfo() << "YoloBoardBackend: own channel:" << channelId.left(16) + "...";
-
-            // Auto-subscribe to own channel
             if (!m_channels.contains(m_ownChannelId)) {
                 m_channels.prepend(m_ownChannelId);
                 emit channelsChanged();
@@ -75,7 +77,7 @@ void YoloBoardBackend::initZoneSequencer() {
 
         m_connected = true;
         emit connectedChanged();
-        setStatus("Connected to " + m_nodeUrl);
+        setStatus((isStandalone() ? "[standalone] " : "") + "Connected to " + m_nodeUrl);
         m_pollTimer->start();
     }
 }
@@ -156,18 +158,24 @@ QString YoloBoardBackend::currentChannelId() const {
 
 void YoloBoardBackend::publish(const QString& message) {
     if (message.trimmed().isEmpty()) return;
-    if (!m_connected) {
-        setStatus("Not connected — cannot publish");
-        return;
-    }
-    if (m_signingKey.isEmpty()) {
-        setStatus("No signing key set");
-        return;
-    }
+    if (!m_connected) { setStatus("Not connected — cannot publish"); return; }
+    if (m_signingKey.isEmpty()) { setStatus("No signing key set"); return; }
 
     setStatus("Publishing...");
-    QVariant result = invokeZone("publish", {message});
-    QString txHash = result.toString();
+    QString txHash;
+
+    if (isStandalone()) {
+        QString ckptPath = m_checkpointDir.isEmpty()
+            ? "" : m_checkpointDir + "/zone.checkpoint";
+        char* raw = zone_publish(
+            m_nodeUrl.toUtf8().constData(),
+            m_signingKey.toUtf8().constData(),
+            message.toUtf8().constData(),
+            ckptPath.toUtf8().constData());
+        if (raw) { txHash = QString::fromUtf8(raw); zone_free_string(raw); }
+    } else {
+        txHash = invokeZone("publish", {message}).toString();
+    }
 
     if (txHash.isEmpty() || txHash.startsWith("Error:")) {
         setStatus("Publish failed: " + txHash);
@@ -175,7 +183,6 @@ void YoloBoardBackend::publish(const QString& message) {
     } else {
         setStatus("Published: " + txHash.left(12) + "...");
         emit publishResult(true, txHash);
-        // Trigger immediate poll to pick up new message
         pollMessages();
     }
 }
@@ -189,8 +196,16 @@ void YoloBoardBackend::pollMessages() {
 }
 
 void YoloBoardBackend::fetchAndMergeMessages(const QString& channelId) {
-    QVariant result = invokeZone("query_channel", {channelId, kQueryLimit});
-    QString json = result.toString();
+    QString json;
+    if (isStandalone()) {
+        char* raw = zone_query_channel(
+            m_nodeUrl.toUtf8().constData(),
+            channelId.toUtf8().constData(),
+            kQueryLimit);
+        if (raw) { json = QString::fromUtf8(raw); zone_free_string(raw); }
+    } else {
+        json = invokeZone("query_channel", {channelId, kQueryLimit}).toString();
+    }
     if (json.isEmpty() || json == "[]") return;
 
     QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());

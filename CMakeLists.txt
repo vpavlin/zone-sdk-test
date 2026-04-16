@@ -13,7 +13,22 @@ if(NOT LOGOS_CPP_SDK_ROOT)
     set(LOGOS_CPP_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../logos-cpp-sdk")
 endif()
 
-# ── Plugin target ────────────────────────────────────────────────────────────
+# ── zone-sequencer-rs (for standalone mode) ──────────────────────────────────
+if(NOT ZONE_SEQUENCER_RS_LIB_DIR)
+    set(ZONE_SEQUENCER_RS_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../zone-sequencer-rs/target/release")
+endif()
+
+if(APPLE)
+    set(DYLIB_EXT ".dylib")
+else()
+    set(DYLIB_EXT ".so")
+endif()
+
+# ── Shared QML resources ─────────────────────────────────────────────────────
+# Used by both plugin and standalone app
+set(QML_SOURCES src/qml/Main.qml)
+
+# ── Basecamp plugin target ────────────────────────────────────────────────────
 set(PLUGIN_TARGET yolo_board_plugin)
 
 qt_add_plugin(${PLUGIN_TARGET} CLASS_NAME YoloBoardPlugin)
@@ -26,8 +41,7 @@ target_sources(${PLUGIN_TARGET} PRIVATE
 qt_add_resources(${PLUGIN_TARGET} "yolo_board_qml"
     PREFIX "/"
     BASE "src/qml"
-    FILES
-        src/qml/Main.qml
+    FILES ${QML_SOURCES}
 )
 
 target_include_directories(${PLUGIN_TARGET} PRIVATE
@@ -38,6 +52,8 @@ target_include_directories(${PLUGIN_TARGET} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+target_link_directories(${PLUGIN_TARGET} PRIVATE "${ZONE_SEQUENCER_RS_LIB_DIR}")
+
 target_link_libraries(${PLUGIN_TARGET} PRIVATE
     Qt6::Core
     Qt6::Gui
@@ -46,9 +62,9 @@ target_link_libraries(${PLUGIN_TARGET} PRIVATE
     Qt6::QuickWidgets
     Qt6::Qml
     ${LOGOS_CPP_SDK_ROOT}/lib/liblogos_sdk.a
+    zone_sequencer_rs
 )
 
-# ── OS rpath ────────────────────────────────────────────────────────────────
 if(APPLE)
     set_target_properties(${PLUGIN_TARGET} PROPERTIES
         BUILD_RPATH "@loader_path"
@@ -61,8 +77,55 @@ elseif(UNIX)
     )
 endif()
 
+# ── Standalone app target ─────────────────────────────────────────────────────
+set(APP_TARGET yolo_board_app)
+
+qt_add_executable(${APP_TARGET}
+    src/main.cpp
+    src/YoloBoardBackend.cpp
+)
+
+qt_add_resources(${APP_TARGET} "yolo_board_app_qml"
+    PREFIX "/"
+    BASE "src/qml"
+    FILES ${QML_SOURCES}
+)
+
+target_include_directories(${APP_TARGET} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_directories(${APP_TARGET} PRIVATE "${ZONE_SEQUENCER_RS_LIB_DIR}")
+
+target_link_libraries(${APP_TARGET} PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    Qt6::Quick
+    Qt6::Qml
+    zone_sequencer_rs
+)
+
+if(APPLE)
+    set_target_properties(${APP_TARGET} PROPERTIES
+        BUILD_RPATH "@loader_path"
+        INSTALL_RPATH "@loader_path"
+    )
+elseif(UNIX)
+    set_target_properties(${APP_TARGET} PROPERTIES
+        BUILD_RPATH "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN"
+    )
+endif()
+
 # ── Install ──────────────────────────────────────────────────────────────────
 install(TARGETS ${PLUGIN_TARGET}
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
+)
+install(TARGETS ${APP_TARGET}
+    RUNTIME DESTINATION bin
+)
+install(FILES "${ZONE_SEQUENCER_RS_LIB_DIR}/libzone_sequencer_rs${DYLIB_EXT}"
+    DESTINATION lib
 )

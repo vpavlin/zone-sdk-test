@@ -8,6 +8,15 @@
 #include <QTimer>
 #include <QMap>
 
+// Direct Rust FFI — used in standalone mode (no LogosAPI)
+extern "C" {
+    char* zone_publish(const char* node_url, const char* signing_key_hex,
+                       const char* data, const char* checkpoint_path);
+    char* zone_query_channel(const char* node_url, const char* channel_id_hex, int limit);
+    char* zone_derive_channel_id(const char* signing_key_hex);
+    void  zone_free_string(char* s);
+}
+
 class LogosAPI;
 class LogosAPIClient;
 
@@ -61,6 +70,8 @@ private slots:
     void pollMessages();
 
 private:
+    bool isStandalone() const;   // true when running without LogosAPI
+
     // Call zone_sequencer module via LogosAPI
     QVariant invokeZone(const QString& method,
                         const QVariantList& args = {});
