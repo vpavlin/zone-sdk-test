@@ -22,7 +22,7 @@
       inputs.logos-liblogos.follows = "logos-liblogos";
     };
     zone-sequencer-rs = {
-      url = "github:vpavlin/zone-sequencer-rs/be351f9";
+      url = "github:vpavlin/zone-sequencer-rs/b9bba3a";
       flake = false;
     };
   };
@@ -62,7 +62,7 @@
               outputHashes = {
                 "jf-crhf-0.1.1" = "sha256-TUm91XROmUfqwFqkDmQEKyT9cOo1ZgAbuTDyEfe6ltg=";
                 "jf-poseidon2-0.1.0" = "sha256-QeCjgZXO7lFzF2Gzm2f8XI08djm5jyKI6D8U0jNTPB8=";
-                "logos-blockchain-blend-crypto-0.2.1" = "sha256-ktiBE0+MX6n29dbbljG3Z+YrJBM+g3DZYZeqZnyNhzQ=";
+                "logos-blockchain-blend-crypto-0.2.1" = "sha256-gZfVABdtKAMJ6JB3x1xs+qCU1ieo8GQ2Vs6UI6hU1LY=";
                 "overwatch-0.1.0" = "sha256-L7R1GdhRNNsymYe3RVyYLAmd6x1YY08TBJp4hG4/YwE=";
               };
             };
