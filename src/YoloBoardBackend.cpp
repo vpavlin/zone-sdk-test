@@ -222,13 +222,24 @@ YoloBoardBackend::YoloBoardBackend(LogosAPI* logosAPI, QObject* parent)
 }
 
 YoloBoardBackend::~YoloBoardBackend() {
-    // Cancel any in-flight publishes to avoid callbacks on a destroyed object
+    // Stop the poll timer so no new background tasks are enqueued
+    m_pollTimer->stop();
+
+    // Cancel all running backfills
+    for (auto& cancelled : m_backfillCancelled)
+        cancelled->store(true);
+
+    // Cancel any in-flight publishes
     for (auto* w : m_publishWatchers) {
         w->cancel();
         w->waitForFinished();
         delete w;
     }
     m_publishWatchers.clear();
+
+    // Wait for all background thread-pool tasks (polls, backfills) to finish
+    // so their QMetaObject::invokeMethod callbacks don't fire on a dead object.
+    QThreadPool::globalInstance()->waitForDone(3000);
 }
 
 // ── Settings persistence ──────────────────────────────────────────────────────
