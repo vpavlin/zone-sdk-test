@@ -687,16 +687,16 @@
         "zone-sequencer-rs": "zone-sequencer-rs"
       },
       "locked": {
-        "lastModified": 1776328302,
-        "narHash": "sha256-Nb0SWCVA/ncdteQlTkf6Nj3xi9Zx0z1MRBhMsxuhy6k=",
+        "lastModified": 1776368146,
+        "narHash": "sha256-Bbklmp/I4PlTvhZ8FZ1SUPS05HXM6cI5TTgytPjLydE=",
         "owner": "vpavlin",
         "repo": "logos-zone-sequencer-module",
-        "rev": "f279a647fbc9b40f11b3d53885fec170583884b7",
+        "rev": "96d3bf666767ebf3e0236c46784ecd48e7c22567",
         "type": "github"
       },
       "original": {
         "owner": "vpavlin",
-        "ref": "f279a64",
+        "ref": "96d3bf6",
         "repo": "logos-zone-sequencer-module",
         "type": "github"
       }
@@ -721,16 +721,16 @@
     "zone-sequencer-rs_2": {
       "flake": false,
       "locked": {
-        "lastModified": 1776344961,
-        "narHash": "sha256-kKy2KeoD5rZuewVvtXbwv1f/NY6abeRFLjEbs31Q++s=",
+        "lastModified": 1776366733,
+        "narHash": "sha256-lPG3/7WxHpNSPt9nQiLliLpvP/e5SE2uECWXbErrBQA=",
         "owner": "vpavlin",
         "repo": "zone-sequencer-rs",
-        "rev": "f7c706fd46fbce312c874cd59f79e900821cb376",
+        "rev": "31ee86a4357e0f5180627554c53c5dcccda8947b",
         "type": "github"
       },
       "original": {
         "owner": "vpavlin",
-        "ref": "f7c706f",
+        "ref": "31ee86a",
         "repo": "zone-sequencer-rs",
         "type": "github"
       }

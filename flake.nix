@@ -16,13 +16,13 @@
       url = "github:logos-co/logos-package/9e3730d5c0e3ec955761c05b50e3a6047ee4030b";
     };
     zone-sequencer-module = {
-      url = "github:vpavlin/logos-zone-sequencer-module/f279a64";
+      url = "github:vpavlin/logos-zone-sequencer-module/96d3bf6";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.logos-cpp-sdk.follows = "logos-cpp-sdk";
       inputs.logos-liblogos.follows = "logos-liblogos";
     };
     zone-sequencer-rs = {
-      url = "github:vpavlin/zone-sequencer-rs/2ab7682";
+      url = "github:vpavlin/zone-sequencer-rs/31ee86a";
       flake = false;
     };
   };
