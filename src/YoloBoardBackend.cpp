@@ -289,6 +289,17 @@ void YoloBoardBackend::setCheckpointDir(const QString& dir) {
     m_checkpointDir = dir;
 }
 
+void YoloBoardBackend::resetCheckpoint() {
+    if (m_checkpointDir.isEmpty()) return;
+    QString path = m_checkpointDir + "/zone.checkpoint";
+    if (QFile::exists(path)) {
+        QFile::rename(path, path + ".bak");
+        setStatus("Checkpoint reset — publish should work now");
+    } else {
+        setStatus("No checkpoint to reset");
+    }
+}
+
 void YoloBoardBackend::subscribe(const QString& input) {
     QString channelId = input.trimmed();
     if (channelId.isEmpty()) return;

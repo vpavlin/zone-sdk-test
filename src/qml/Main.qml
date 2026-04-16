@@ -341,6 +341,13 @@ ApplicationWindow {
                             enabled: backend.connected && composeInput.text.length > 0
                             onClicked: doPublish()
                         }
+                        Button {
+                            text: "⟳ Reset"
+                            font.pixelSize: 11
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Clear stale checkpoint if Publish is stuck"
+                            onClicked: backend.resetCheckpoint()
+                        }
                     }
                 }
 

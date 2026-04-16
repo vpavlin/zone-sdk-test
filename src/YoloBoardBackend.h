@@ -74,6 +74,7 @@ public:
     Q_INVOKABLE void setCheckpointDir(const QString& dir);
     Q_INVOKABLE QString currentChannelId() const;
     Q_INVOKABLE void clearUnread(const QString& channelId);
+    Q_INVOKABLE void resetCheckpoint();
     Q_INVOKABLE void startBackfill(const QString& channelId);
     Q_INVOKABLE void stopBackfill(const QString& channelId);
 
