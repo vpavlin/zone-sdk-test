@@ -133,6 +133,32 @@ ApplicationWindow {
                                     elide: Text.ElideRight
                                 }
 
+                                // Backfill spinner / button
+                                Rectangle {
+                                    property real prog: backend.backfillProgress[modelData] || -1
+                                    property bool backfilling: prog >= 0
+                                    visible: backfilling || (index === backend.currentChannelIndex)
+                                    width: 18; height: 18; radius: 9
+                                    color: backfilling ? "#4488ff" : "transparent"
+                                    border.color: backfilling ? "transparent" : root.mutedColor
+                                    border.width: backfilling ? 0 : 1
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "⟳"
+                                        color: parent.backfilling ? "white" : root.mutedColor
+                                        font.pixelSize: 11
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: {
+                                            if (parent.backfilling)
+                                                backend.stopBackfill(modelData)
+                                            else
+                                                backend.startBackfill(modelData)
+                                        }
+                                    }
+                                }
+
                                 // Unread badge
                                 Rectangle {
                                     visible: (backend.unreadCounts[modelData] || 0) > 0

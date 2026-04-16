@@ -15,13 +15,18 @@
 #include <QDateTime>
 #include <QRegularExpression>
 #include <QFutureWatcher>
+#include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
+#include <atomic>
+#include <memory>
 
 // Direct Rust FFI — used in standalone mode (no LogosAPI)
 extern "C" {
     char* zone_publish(const char* node_url, const char* signing_key_hex,
                        const char* data, const char* checkpoint_path);
     char* zone_query_channel(const char* node_url, const char* channel_id_hex, int limit);
+    char* zone_query_channel_paged(const char* node_url, const char* channel_id_hex,
+                                   const char* cursor_json, int limit);
     void  zone_free_string(char* s);
 }
 
@@ -44,6 +49,7 @@ class YoloBoardBackend : public QObject {
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(QVariantMap unreadCounts READ unreadCounts NOTIFY unreadCountsChanged)
     Q_PROPERTY(QString nodeUrl READ nodeUrl WRITE setNodeUrl NOTIFY nodeUrlChanged)
+    Q_PROPERTY(QVariantMap backfillProgress READ backfillProgress NOTIFY backfillProgressChanged)
 
 public:
     explicit YoloBoardBackend(LogosAPI* logosAPI, QObject* parent = nullptr);
@@ -57,6 +63,7 @@ public:
     QString status() const { return m_status; }
     QVariantMap unreadCounts() const;
     QString nodeUrl() const { return m_nodeUrl; }
+    QVariantMap backfillProgress() const;
 
     Q_INVOKABLE void subscribe(const QString& channelIdOrName);
     Q_INVOKABLE void unsubscribe(const QString& channelId);
@@ -67,6 +74,8 @@ public:
     Q_INVOKABLE void setCheckpointDir(const QString& dir);
     Q_INVOKABLE QString currentChannelId() const;
     Q_INVOKABLE void clearUnread(const QString& channelId);
+    Q_INVOKABLE void startBackfill(const QString& channelId);
+    Q_INVOKABLE void stopBackfill(const QString& channelId);
 
     // Named-channel helpers — callable from QML for display
     Q_INVOKABLE QString channelDisplayName(const QString& channelId) const;
@@ -81,6 +90,7 @@ signals:
     void unreadCountsChanged();
     void nodeUrlChanged();
     void publishResult(bool success, const QString& txHash);
+    void backfillProgressChanged();
 
 private slots:
     void pollMessages();
@@ -112,6 +122,10 @@ private:
                            const QString& channelId,
                            const QString& pendingMsgId);
 
+    // Backfill helpers
+    void runBackfill(const QString& channelId,
+                     std::shared_ptr<std::atomic<bool>> cancelled);
+
     LogosAPI*         m_logosAPI = nullptr;
     LogosAPIClient*   m_zoneClient = nullptr;
 
@@ -129,6 +143,11 @@ private:
     QMap<QString, QString>      m_lastSeenId;
 
     QList<QFutureWatcher<QString>*> m_publishWatchers;
+
+    // Backfill state: channelId → cancel flag
+    QMap<QString, std::shared_ptr<std::atomic<bool>>> m_backfillCancelled;
+    // channelId → {cursor_slot, lib_slot} for progress reporting
+    QMap<QString, QPair<quint64,quint64>> m_backfillSlots;
 
     QTimer* m_pollTimer = nullptr;
     static constexpr int kPollIntervalMs   = 3000;

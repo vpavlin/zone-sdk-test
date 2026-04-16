@@ -524,3 +524,141 @@ QVariantMap YoloBoardBackend::unreadCounts() const {
         out[it.key()] = it.value();
     return out;
 }
+
+QVariantMap YoloBoardBackend::backfillProgress() const {
+    QVariantMap out;
+    for (auto it = m_backfillSlots.constBegin(); it != m_backfillSlots.constEnd(); ++it) {
+        quint64 cursorSlot = it.value().first;
+        quint64 libSlot    = it.value().second;
+        double progress = (libSlot > 0) ? qMin(1.0, double(cursorSlot) / double(libSlot)) : 0.0;
+        out[it.key()] = progress;
+    }
+    return out;
+}
+
+// ── History backfill ──────────────────────────────────────────────────────────
+
+void YoloBoardBackend::startBackfill(const QString& channelId) {
+    if (!isStandalone()) return;  // only supported in standalone mode for now
+    if (m_backfillCancelled.contains(channelId)) return;  // already running
+
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
+    m_backfillCancelled[channelId] = cancelled;
+    m_backfillSlots[channelId] = {0, 1};
+    emit backfillProgressChanged();
+
+    QString nodeUrl   = m_nodeUrl;
+    QString chId      = channelId;
+    QString ckptDir   = m_checkpointDir;
+
+    auto* pool = QThreadPool::globalInstance();
+    pool->start([this, chId, cancelled]() {
+        runBackfill(chId, cancelled);
+    });
+}
+
+void YoloBoardBackend::stopBackfill(const QString& channelId) {
+    auto it = m_backfillCancelled.find(channelId);
+    if (it != m_backfillCancelled.end()) {
+        (*it)->store(true);
+        m_backfillCancelled.erase(it);
+    }
+    m_backfillSlots.remove(channelId);
+    emit backfillProgressChanged();
+}
+
+void YoloBoardBackend::runBackfill(const QString& channelId,
+                                    std::shared_ptr<std::atomic<bool>> cancelled) {
+    static const int kPageSize = 100;
+    QByteArray cursorJson;  // empty = from genesis
+
+    while (!cancelled->load()) {
+        const char* cursorArg = cursorJson.isEmpty() ? nullptr : cursorJson.constData();
+        char* raw = zone_query_channel_paged(
+            m_nodeUrl.toUtf8().constData(),
+            channelId.toUtf8().constData(),
+            cursorArg,
+            kPageSize);
+
+        if (!raw) {
+            qWarning() << "YoloBoardBackend::runBackfill: zone_query_channel_paged returned NULL";
+            break;
+        }
+
+        QString jsonStr = QString::fromUtf8(raw);
+        zone_free_string(raw);
+
+        QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8());
+        if (!doc.isObject()) {
+            qWarning() << "YoloBoardBackend::runBackfill: unexpected JSON";
+            break;
+        }
+        QJsonObject root = doc.object();
+
+        // Update progress on main thread
+        quint64 cursorSlot = (quint64)root["cursor_slot"].toDouble();
+        quint64 libSlot    = (quint64)root["lib_slot"].toDouble();
+        bool done          = root["done"].toBool(false);
+
+        QMetaObject::invokeMethod(this, [this, channelId, cursorSlot, libSlot]() {
+            m_backfillSlots[channelId] = {cursorSlot, libSlot};
+            emit backfillProgressChanged();
+        }, Qt::QueuedConnection);
+
+        // Merge messages on main thread
+        QJsonArray msgs = root["messages"].toArray();
+        if (!msgs.isEmpty()) {
+            QVariantList newMsgs;
+            for (const QJsonValue& val : msgs) {
+                QJsonObject obj = val.toObject();
+                QVariantMap msg;
+                msg["id"]      = obj["id"].toString();
+                msg["data"]    = obj["data"].toString();
+                msg["channel"] = channelId;
+                msg["isOwn"]   = (channelId == m_ownChannelId);
+                msg["timestamp"] = QString();  // historical — no timestamp available
+                msg["pending"] = false;
+                msg["failed"]  = false;
+                newMsgs.append(msg);
+            }
+            QMetaObject::invokeMethod(this, [this, channelId, newMsgs]() {
+                QVariantList& existing = m_messages[channelId];
+                QSet<QString> seenIds;
+                for (const QVariant& v : existing)
+                    seenIds.insert(v.toMap().value("id").toString());
+
+                QVariantList prepend;
+                for (const QVariant& v : newMsgs) {
+                    QString id = v.toMap().value("id").toString();
+                    if (!seenIds.contains(id)) {
+                        prepend.append(v);
+                        seenIds.insert(id);
+                    }
+                }
+                if (!prepend.isEmpty()) {
+                    // Historical messages go before current ones
+                    existing = prepend + existing;
+                    saveCacheForChannel(channelId);
+                    if (channelId == currentChannelId()) emit messagesChanged();
+                }
+            }, Qt::QueuedConnection);
+        }
+
+        // Advance cursor for next page
+        QJsonDocument cursorDoc(root["cursor"].toObject());
+        cursorJson = cursorDoc.toJson(QJsonDocument::Compact);
+
+        if (done || cancelled->load()) break;
+
+        // Brief yield between pages to avoid hammering the node
+        QThread::msleep(200);
+    }
+
+    // Backfill complete — clean up state on main thread
+    QMetaObject::invokeMethod(this, [this, channelId]() {
+        m_backfillCancelled.remove(channelId);
+        m_backfillSlots.remove(channelId);
+        emit backfillProgressChanged();
+        setStatus("Backfill complete for " + channelDisplayName(channelId));
+    }, Qt::QueuedConnection);
+}
