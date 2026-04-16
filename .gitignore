@@ -1,14 +1,25 @@
-/target/
+# Build artifacts
+build/
+build-*/
+*.so
+*.dylib
+result
+result-*
 
-# Runtime data files — contain your private key; do NOT commit
+# Qt / CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.moc
+moc_*.cpp
+qrc_*.cpp
+
+# Runtime data (not for version control)
 sequencer.key
 sequencer.checkpoint
-channel.id
+sequencer.checkpoint.channel
 subscriptions.json
-zone-board.log
 cache/
-
-# If DATA_DIR is set to a subdirectory, ignore those too
-*.key
-*.checkpoint
-*.id
+*.log
+*.tar.gz
+channel.id
