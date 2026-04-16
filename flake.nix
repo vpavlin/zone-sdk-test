@@ -140,6 +140,7 @@
                 --prefix LD_LIBRARY_PATH : "${pkgs.openssl.out}/lib"
                 --prefix LD_LIBRARY_PATH : "$out/lib"
                 --set QML_DISABLE_DISK_CACHE 1
+                --set-default QT_QUICK_BACKEND software
               )
             '';
           };
