@@ -17,7 +17,7 @@
     };
     # zone-sequencer-module provides blockchain inscription capabilities
     zone-sequencer-module = {
-      url = "github:jimmy-claw/logos-zone-sequencer-module";
+      url = "github:vpavlin/logos-zone-sequencer-module/762c18508189b301f37754f6b20edf0acdd8cfb3";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.logos-cpp-sdk.follows = "logos-cpp-sdk";
       inputs.logos-liblogos.follows = "logos-liblogos";
