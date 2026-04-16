@@ -17,8 +17,13 @@ extern "C" {
     void  zone_free_string(char* s);
 }
 
+#ifdef LOGOS_CORE_AVAILABLE
 class LogosAPI;
 class LogosAPIClient;
+#else
+class LogosAPI {};       // empty stub so constructor signature compiles
+class LogosAPIClient {}; // never instantiated in standalone mode
+#endif
 
 class YoloBoardBackend : public QObject {
     Q_OBJECT

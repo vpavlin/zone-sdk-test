@@ -1,6 +1,8 @@
 #include "YoloBoardBackend.h"
-#include "logos_api.h"
-#include "logos_api_client.h"
+#ifdef LOGOS_CORE_AVAILABLE
+#  include "logos_api.h"
+#  include "logos_api_client.h"
+#endif
 
 #include <QDebug>
 #include <QJsonArray>
@@ -19,7 +21,9 @@ YoloBoardBackend::YoloBoardBackend(LogosAPI* logosAPI, QObject* parent)
     connect(m_pollTimer, &QTimer::timeout, this, &YoloBoardBackend::pollMessages);
 
     if (m_logosAPI) {
+#ifdef LOGOS_CORE_AVAILABLE
         m_zoneClient = m_logosAPI->getClient(kZoneModuleName);
+#endif
         setStatus("Waiting for configuration...");
     } else {
         setStatus("No Logos API — standalone mode");
@@ -37,11 +41,16 @@ void YoloBoardBackend::setStatus(const QString& msg) {
 }
 
 QVariant YoloBoardBackend::invokeZone(const QString& method, const QVariantList& args) {
+#ifdef LOGOS_CORE_AVAILABLE
     if (!m_zoneClient) {
         qWarning() << "YoloBoardBackend: no zone client, cannot call" << method;
         return {};
     }
     return m_zoneClient->invokeRemoteMethod(kZoneObjectName, method, args);
+#else
+    Q_UNUSED(method); Q_UNUSED(args);
+    return {};
+#endif
 }
 
 bool YoloBoardBackend::isStandalone() const {

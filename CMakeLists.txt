@@ -52,6 +52,8 @@ target_include_directories(${PLUGIN_TARGET} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+target_compile_definitions(${PLUGIN_TARGET} PRIVATE LOGOS_CORE_AVAILABLE)
+
 target_link_directories(${PLUGIN_TARGET} PRIVATE "${ZONE_SEQUENCER_RS_LIB_DIR}")
 
 target_link_libraries(${PLUGIN_TARGET} PRIVATE
