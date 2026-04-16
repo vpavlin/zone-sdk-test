@@ -135,7 +135,8 @@ private:
 
     // Backfill helpers
     void runBackfill(const QString& channelId,
-                     std::shared_ptr<std::atomic<bool>> cancelled);
+                     std::shared_ptr<std::atomic<bool>> cancelled,
+                     std::shared_ptr<std::atomic<bool>> alive);
 
     LogosAPI*         m_logosAPI = nullptr;
     LogosAPIClient*   m_zoneClient = nullptr;
@@ -160,6 +161,11 @@ private:
     QMap<QString, std::shared_ptr<std::atomic<bool>>> m_backfillCancelled;
     // channelId → {cursor_slot, lib_slot} for progress reporting
     QMap<QString, QPair<quint64,quint64>> m_backfillSlots;
+
+    // Shared liveness flag: set to false in destructor so in-flight background
+    // lambdas can bail out before touching member state via a dangling `this`.
+    std::shared_ptr<std::atomic<bool>> m_alive =
+        std::make_shared<std::atomic<bool>>(true);
 
     QTimer* m_pollTimer = nullptr;
     static constexpr int kPollIntervalMs   = 3000;

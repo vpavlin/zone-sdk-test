@@ -222,6 +222,10 @@ YoloBoardBackend::YoloBoardBackend(LogosAPI* logosAPI, QObject* parent)
 }
 
 YoloBoardBackend::~YoloBoardBackend() {
+    // Signal liveness flag first so any already-running background lambda
+    // aborts before it touches member state through a dangling `this`.
+    m_alive->store(false);
+
     // Stop the poll timer so no new background tasks are enqueued
     m_pollTimer->stop();
 
@@ -237,9 +241,12 @@ YoloBoardBackend::~YoloBoardBackend() {
     }
     m_publishWatchers.clear();
 
-    // Wait for all background thread-pool tasks (polls, backfills) to finish
-    // so their QMetaObject::invokeMethod callbacks don't fire on a dead object.
-    QThreadPool::globalInstance()->waitForDone(3000);
+    // Wait until all background thread-pool tasks exit.  Each task checks
+    // m_alive before calling QMetaObject::invokeMethod(this, ...) so they
+    // will not touch the dead object.  We must wait for them to drain rather
+    // than timing out, because even calling invokeMethod with a destroyed
+    // `this` is UB.
+    QThreadPool::globalInstance()->waitForDone(-1);
 }
 
 // ── Settings persistence ──────────────────────────────────────────────────────
@@ -565,7 +572,8 @@ void YoloBoardBackend::fetchMessagesAsync(const QString& channelId) {
     int     limit    = kQueryLimit;
     bool    standalone = isStandalone();
 
-    QThreadPool::globalInstance()->start([this, channelId, nodeUrl, limit, standalone]() {
+    auto alive = m_alive;
+    QThreadPool::globalInstance()->start([this, alive, channelId, nodeUrl, limit, standalone]() {
         QString json;
         if (standalone) {
             char* raw = zone_query_channel(
@@ -577,7 +585,9 @@ void YoloBoardBackend::fetchMessagesAsync(const QString& channelId) {
             // LogosAPI path: invokeZone is not thread-safe, so marshal back to main thread
             // and do a blocking invoke there instead.  For now this path stays synchronous;
             // it only affects plugin mode which has its own threading model.
-            QMetaObject::invokeMethod(this, [this, channelId, limit]() {
+            if (!alive->load()) return;
+            QMetaObject::invokeMethod(this, [this, alive, channelId, limit]() {
+                if (!alive->load()) return;
                 QString j = invokeZone("query_channel", {channelId, limit}).toString();
                 mergeMessages(channelId, j);
                 m_fetchingChannels.remove(channelId);
@@ -586,7 +596,9 @@ void YoloBoardBackend::fetchMessagesAsync(const QString& channelId) {
         }
 
         // Marshal result back to main thread for safe state mutation
-        QMetaObject::invokeMethod(this, [this, channelId, json]() {
+        if (!alive->load()) return;
+        QMetaObject::invokeMethod(this, [this, alive, channelId, json]() {
+            if (!alive->load()) return;
             mergeMessages(channelId, json);
             m_fetchingChannels.remove(channelId);
         }, Qt::QueuedConnection);
@@ -676,9 +688,10 @@ void YoloBoardBackend::startBackfill(const QString& channelId) {
     QString chId      = channelId;
     QString ckptDir   = m_dataDir;
 
+    auto alive = m_alive;
     auto* pool = QThreadPool::globalInstance();
-    pool->start([this, chId, cancelled]() {
-        runBackfill(chId, cancelled);
+    pool->start([this, alive, chId, cancelled]() {
+        runBackfill(chId, cancelled, alive);
     });
 }
 
@@ -693,7 +706,8 @@ void YoloBoardBackend::stopBackfill(const QString& channelId) {
 }
 
 void YoloBoardBackend::runBackfill(const QString& channelId,
-                                    std::shared_ptr<std::atomic<bool>> cancelled) {
+                                    std::shared_ptr<std::atomic<bool>> cancelled,
+                                    std::shared_ptr<std::atomic<bool>> alive) {
     static const int kPageSize = 100;
     QByteArray cursorJson;  // empty = from genesis
 
@@ -725,7 +739,9 @@ void YoloBoardBackend::runBackfill(const QString& channelId,
         quint64 libSlot    = (quint64)root["lib_slot"].toDouble();
         bool done          = root["done"].toBool(false);
 
-        QMetaObject::invokeMethod(this, [this, channelId, cursorSlot, libSlot]() {
+        if (!alive->load()) break;
+        QMetaObject::invokeMethod(this, [this, alive, channelId, cursorSlot, libSlot]() {
+            if (!alive->load()) return;
             m_backfillSlots[channelId] = {cursorSlot, libSlot};
             emit backfillProgressChanged();
         }, Qt::QueuedConnection);
@@ -746,7 +762,9 @@ void YoloBoardBackend::runBackfill(const QString& channelId,
                 msg["failed"]  = false;
                 newMsgs.append(msg);
             }
-            QMetaObject::invokeMethod(this, [this, channelId, newMsgs]() {
+            if (!alive->load()) break;
+            QMetaObject::invokeMethod(this, [this, alive, channelId, newMsgs]() {
+                if (!alive->load()) return;
                 QVariantList& existing = m_messages[channelId];
                 QSet<QString> seenIds;
                 for (const QVariant& v : existing)
@@ -780,7 +798,9 @@ void YoloBoardBackend::runBackfill(const QString& channelId,
     }
 
     // Backfill complete — clean up state on main thread
-    QMetaObject::invokeMethod(this, [this, channelId]() {
+    if (alive->load())
+    QMetaObject::invokeMethod(this, [this, alive, channelId]() {
+        if (!alive->load()) return;
         m_backfillCancelled.remove(channelId);
         m_backfillSlots.remove(channelId);
         emit backfillProgressChanged();
