@@ -2,7 +2,7 @@
   description = "Yolo Board — censorship-resistant bulletin board for Logos Basecamp";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/e9f00bd8319eb51abcd46a45b5da21c9a67d4f65";
+    nixpkgs.url = "github:NixOS/nixpkgs/bfc1b8a4574108ceef22f02bafcf6611380c100d";
     logos-cpp-sdk = {
       url = "github:logos-co/logos-cpp-sdk/4b66dac015e4b977d33cfae80a4c8e1d518679f3";
       inputs.nixpkgs.follows = "nixpkgs";
