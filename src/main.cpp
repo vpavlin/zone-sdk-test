@@ -32,7 +32,7 @@ static int runHeadless(const QCoreApplication& app,
     QDir().mkpath(dataDir);
 
     YoloBoardBackend backend(nullptr);
-    backend.setCheckpointDir(dataDir);
+    backend.setDataDir(dataDir);
 
     int  exitCode = 2;   // default: timeout
 
@@ -151,7 +151,7 @@ int main(int argc, char* argv[]) {
     YoloBoardBackend backend(nullptr);
     QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QDir().mkpath(dataDir);
-    backend.setCheckpointDir(dataDir);
+    backend.setDataDir(dataDir);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("backend", &backend);

@@ -68,8 +68,8 @@ QString YoloBoardBackend::channelDisplayName(const QString& channelId) const {
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
 QString YoloBoardBackend::cacheFilePath(const QString& channelId) const {
-    if (m_checkpointDir.isEmpty()) return {};
-    return m_checkpointDir + "/cache/" + channelId + ".json";
+    if (m_dataDir.isEmpty()) return {};
+    return m_dataDir + "/cache/" + channelId + ".json";
 }
 
 void YoloBoardBackend::loadCacheForChannel(const QString& channelId) {
@@ -136,27 +136,67 @@ void YoloBoardBackend::saveCacheForChannel(const QString& channelId) {
 // ── Subscription persistence ──────────────────────────────────────────────────
 
 void YoloBoardBackend::saveSubscriptions() {
-    QSettings s;
-    QStringList subs;
-    for (const QString& ch : m_channels)
-        if (ch != m_ownChannelId)
-            subs.append(ch);
-    s.setValue("subscribedChannels", subs);
+    saveSubscriptionsJson();
 }
 
 void YoloBoardBackend::loadSubscriptions() {
-    QSettings s;
-    QStringList subs = s.value("subscribedChannels").toStringList();
+    loadSubscriptionsJson();
+}
+
+void YoloBoardBackend::saveSubscriptionsJson() {
+    if (m_dataDir.isEmpty()) return;
+    QString path = m_dataDir + "/subscriptions.json";
+    QJsonArray arr;
+    for (const QString& ch : m_channels)
+        if (ch != m_ownChannelId)
+            arr.append(ch);
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        f.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+}
+
+void YoloBoardBackend::loadSubscriptionsJson() {
+    if (m_dataDir.isEmpty()) return;
+    QString path = m_dataDir + "/subscriptions.json";
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    if (!doc.isArray()) return;
     bool changed = false;
-    for (const QString& ch : subs) {
+    for (const QJsonValue& val : doc.array()) {
+        QString ch = val.toString();
         if (ch.isEmpty() || m_channels.contains(ch)) continue;
         m_channels.append(ch);
         m_unreadCounts[ch] = 0;
         loadCacheForChannel(ch);
-        fetchMessagesAsync(ch);
+        startBackfill(ch);
         changed = true;
     }
     if (changed) emit channelsChanged();
+}
+
+// ── File-based key and channel loading ───────────────────────────────────────
+
+bool YoloBoardBackend::loadKeyFromFile() {
+    if (m_dataDir.isEmpty()) return false;
+    QString path = m_dataDir + "/sequencer.key";
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QByteArray raw = f.readAll();
+    if (raw.size() != 32) return false;
+    m_signingKey = QString::fromLatin1(raw.toHex());
+    return true;
+}
+
+bool YoloBoardBackend::loadChannelFromFile() {
+    if (m_dataDir.isEmpty()) return false;
+    QString path = m_dataDir + "/channel.id";
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QByteArray raw = f.readAll();
+    if (raw.size() != 32) return false;
+    m_ownChannelId = QString::fromLatin1(raw.toHex());
+    return true;
 }
 
 // ── Constructor / destructor ──────────────────────────────────────────────────
@@ -195,19 +235,18 @@ YoloBoardBackend::~YoloBoardBackend() {
 
 void YoloBoardBackend::loadSettings() {
     QSettings s;
-    QString key  = s.value("signingKey").toString();
-    QString node = s.value("nodeUrl", m_nodeUrl).toString();
+    QString node    = s.value("nodeUrl", m_nodeUrl).toString();
+    QString dataDir = s.value("dataDir").toString();
     if (!node.isEmpty()) m_nodeUrl = node;
-    if (!key.isEmpty()) {
-        m_signingKey = key;
-        initZoneSequencer();
-    }
+    if (!dataDir.isEmpty() && m_dataDir.isEmpty()) m_dataDir = dataDir;
+    // Try to initialise from file-based config
+    initZoneSequencer();
 }
 
 void YoloBoardBackend::saveSettings() {
     QSettings s;
-    s.setValue("signingKey", m_signingKey);
-    s.setValue("nodeUrl",    m_nodeUrl);
+    s.setValue("nodeUrl", m_nodeUrl);
+    if (!m_dataDir.isEmpty()) s.setValue("dataDir", m_dataDir);
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -236,37 +275,51 @@ bool YoloBoardBackend::isStandalone() const {
 }
 
 void YoloBoardBackend::initZoneSequencer() {
-    if (!m_signingKey.isEmpty()) {
-        QString channelId;
+    // Try loading key from file first; fall back to m_signingKey already set
+    bool keyFromFile = loadKeyFromFile();
+    if (!keyFromFile && m_signingKey.isEmpty()) {
+        // No key available at all — stay unconfigured
+        return;
+    }
+
+    // Try loading channel from file; if not found, derive from key
+    bool channelFromFile = loadChannelFromFile();
+    if (!channelFromFile) {
+        if (m_signingKey.isEmpty()) return;
         if (isStandalone()) {
-            channelId = deriveChannelId(m_signingKey);
+            m_ownChannelId = deriveChannelId(m_signingKey);
         } else {
             invokeZone("set_node_url", {m_nodeUrl});
             invokeZone("set_signing_key", {m_signingKey});
-            if (!m_checkpointDir.isEmpty())
-                invokeZone("set_checkpoint_path", {m_checkpointDir + "/zone.checkpoint"});
-            channelId = invokeZone("get_channel_id").toString();
+            if (!m_dataDir.isEmpty())
+                invokeZone("set_checkpoint_path", {m_dataDir + "/sequencer.checkpoint"});
+            m_ownChannelId = invokeZone("get_channel_id").toString();
         }
-
-        if (!channelId.isEmpty() && !channelId.startsWith("Error:")) {
-            m_ownChannelId = channelId;
-            emit ownChannelIdChanged();
-            qInfo() << "YoloBoardBackend: own channel:" << channelId.left(16) + "...";
-            if (!m_channels.contains(m_ownChannelId)) {
-                m_channels.prepend(m_ownChannelId);
-                emit channelsChanged();
-            }
-            loadCacheForChannel(m_ownChannelId);
-        } else {
-            qWarning() << "YoloBoardBackend: get_channel_id failed:" << channelId;
-        }
-
-        m_connected = true;
-        emit connectedChanged();
-        setStatus(QString(isStandalone() ? "[standalone] " : "") + "Connected to " + m_nodeUrl);
-        m_pollTimer->start();
-        loadSubscriptions();
+    } else if (!isStandalone()) {
+        invokeZone("set_node_url", {m_nodeUrl});
+        invokeZone("set_signing_key", {m_signingKey});
+        if (!m_dataDir.isEmpty())
+            invokeZone("set_checkpoint_path", {m_dataDir + "/sequencer.checkpoint"});
     }
+
+    if (m_ownChannelId.isEmpty() || m_ownChannelId.startsWith("Error:")) {
+        qWarning() << "YoloBoardBackend: could not determine own channel ID";
+        return;
+    }
+
+    emit ownChannelIdChanged();
+    qInfo() << "YoloBoardBackend: own channel:" << m_ownChannelId.left(16) + "...";
+    if (!m_channels.contains(m_ownChannelId)) {
+        m_channels.prepend(m_ownChannelId);
+        emit channelsChanged();
+    }
+    loadCacheForChannel(m_ownChannelId);
+
+    m_connected = true;
+    emit connectedChanged();
+    setStatus(QString(isStandalone() ? "[standalone] " : "") + "Connected to " + m_nodeUrl);
+    m_pollTimer->start();
+    loadSubscriptionsJson();
 }
 
 // ── Q_INVOKABLEs ─────────────────────────────────────────────────────────────
@@ -285,13 +338,21 @@ void YoloBoardBackend::setSigningKey(const QString& hex) {
     initZoneSequencer();
 }
 
-void YoloBoardBackend::setCheckpointDir(const QString& dir) {
-    m_checkpointDir = dir;
+void YoloBoardBackend::setDataDir(const QString& dir) {
+    if (m_dataDir == dir) return;
+    m_dataDir = dir;
+    emit dataDirChanged();
+    saveSettings();
+    initZoneSequencer();
+}
+
+void YoloBoardBackend::connectToNode() {
+    initZoneSequencer();
 }
 
 void YoloBoardBackend::resetCheckpoint() {
-    if (m_checkpointDir.isEmpty()) return;
-    QString path = m_checkpointDir + "/zone.checkpoint";
+    if (m_dataDir.isEmpty()) return;
+    QString path = m_dataDir + "/sequencer.checkpoint";
     if (QFile::exists(path)) {
         QFile::rename(path, path + ".bak");
         setStatus("Checkpoint reset — publish should work now");
@@ -323,10 +384,11 @@ void YoloBoardBackend::subscribe(const QString& input) {
     m_channels.append(channelId);
     m_unreadCounts[channelId] = 0;
     emit channelsChanged();
-    saveSubscriptions();
+    saveSubscriptionsJson();
     setStatus("Subscribed to " + channelDisplayName(channelId));
     loadCacheForChannel(channelId);
     fetchMessagesAsync(channelId);
+    startBackfill(channelId);
 }
 
 void YoloBoardBackend::unsubscribe(const QString& channelId) {
@@ -345,7 +407,7 @@ void YoloBoardBackend::unsubscribe(const QString& channelId) {
     emit currentChannelIndexChanged();
     emit channelsChanged();
     emit messagesChanged();
-    saveSubscriptions();
+    saveSubscriptionsJson();
 }
 
 void YoloBoardBackend::setCurrentChannelIndex(int index) {
@@ -394,16 +456,18 @@ void YoloBoardBackend::publish(const QString& message) {
 
     if (isStandalone()) {
         // Run zone_publish in a background thread so the UI stays responsive
-        QString nodeUrl  = m_nodeUrl;
-        QString sigKey   = m_signingKey;
-        QString ckptPath = m_checkpointDir.isEmpty()
-                           ? "" : m_checkpointDir + "/zone.checkpoint";
+        QString nodeUrl   = m_nodeUrl;
+        QString channelId = m_ownChannelId;
+        QString sigKey    = m_signingKey;
+        QString ckptPath  = m_dataDir.isEmpty()
+                            ? "" : m_dataDir + "/sequencer.checkpoint";
 
         auto* watcher = new QFutureWatcher<QString>(this);
         m_publishWatchers.append(watcher);
 
         QFuture<QString> future = QtConcurrent::run([=]() -> QString {
             char* raw = zone_publish(nodeUrl.toUtf8().constData(),
+                                     channelId.toUtf8().constData(),
                                      sigKey.toUtf8().constData(),
                                      message.toUtf8().constData(),
                                      ckptPath.toUtf8().constData());
@@ -589,7 +653,7 @@ void YoloBoardBackend::startBackfill(const QString& channelId) {
 
     QString nodeUrl   = m_nodeUrl;
     QString chId      = channelId;
-    QString ckptDir   = m_checkpointDir;
+    QString ckptDir   = m_dataDir;
 
     auto* pool = QThreadPool::globalInstance();
     pool->start([this, chId, cancelled]() {

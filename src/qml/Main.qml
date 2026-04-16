@@ -435,21 +435,20 @@ ApplicationWindow {
                 font.bold: true
             }
             Text {
-                text: "Enter your Ed25519 signing key (64-char hex) and node URL."
+                text: "Enter the path to your Zone data directory (contains sequencer.key and channel.id)."
                 color: root.mutedColor
                 font.pixelSize: 11
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
             TextField {
-                id: keyInput
+                id: dataDirInput
                 Layout.fillWidth: true
-                placeholderText: "Signing key (64-char hex)…"
-                font.family: "monospace"
+                placeholderText: "Data directory (where sequencer.key lives)…"
                 font.pixelSize: 11
                 color: root.textColor
+                text: backend.dataDir
                 background: Rectangle { color: root.accentColor; radius: 3 }
-                echoMode: TextInput.Password
             }
             TextField {
                 id: nodeInput
@@ -464,11 +463,11 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 text: "Connect"
                 font.pixelSize: 13
-                enabled: keyInput.text.length === 64
+                enabled: dataDirInput.text.length > 0
                 onClicked: {
+                    backend.setDataDir(dataDirInput.text)
                     backend.setNodeUrl(nodeInput.text)
-                    backend.setSigningKey(keyInput.text)
-                    root.showSetup = false
+                    backend.connectToNode()
                 }
             }
         }

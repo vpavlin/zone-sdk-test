@@ -22,7 +22,8 @@
 
 // Direct Rust FFI — used in standalone mode (no LogosAPI)
 extern "C" {
-    char* zone_publish(const char* node_url, const char* signing_key_hex,
+    char* zone_publish(const char* node_url, const char* channel_id_hex,
+                       const char* signing_key_hex,
                        const char* data, const char* checkpoint_path);
     char* zone_query_channel(const char* node_url, const char* channel_id_hex, int limit);
     char* zone_query_channel_paged(const char* node_url, const char* channel_id_hex,
@@ -50,6 +51,7 @@ class YoloBoardBackend : public QObject {
     Q_PROPERTY(QVariantMap unreadCounts READ unreadCounts NOTIFY unreadCountsChanged)
     Q_PROPERTY(QString nodeUrl READ nodeUrl WRITE setNodeUrl NOTIFY nodeUrlChanged)
     Q_PROPERTY(QVariantMap backfillProgress READ backfillProgress NOTIFY backfillProgressChanged)
+    Q_PROPERTY(QString dataDir READ dataDir NOTIFY dataDirChanged)
 
 public:
     explicit YoloBoardBackend(LogosAPI* logosAPI, QObject* parent = nullptr);
@@ -64,6 +66,7 @@ public:
     QVariantMap unreadCounts() const;
     QString nodeUrl() const { return m_nodeUrl; }
     QVariantMap backfillProgress() const;
+    QString dataDir() const { return m_dataDir; }
 
     Q_INVOKABLE void subscribe(const QString& channelIdOrName);
     Q_INVOKABLE void unsubscribe(const QString& channelId);
@@ -71,7 +74,8 @@ public:
     Q_INVOKABLE void setCurrentChannelIndex(int index);
     Q_INVOKABLE void setNodeUrl(const QString& url);
     Q_INVOKABLE void setSigningKey(const QString& hex);
-    Q_INVOKABLE void setCheckpointDir(const QString& dir);
+    Q_INVOKABLE void setDataDir(const QString& dir);
+    Q_INVOKABLE void connectToNode();
     Q_INVOKABLE QString currentChannelId() const;
     Q_INVOKABLE void clearUnread(const QString& channelId);
     Q_INVOKABLE void resetCheckpoint();
@@ -92,6 +96,7 @@ signals:
     void nodeUrlChanged();
     void publishResult(bool success, const QString& txHash);
     void backfillProgressChanged();
+    void dataDirChanged();
 
 private slots:
     void pollMessages();
@@ -109,6 +114,10 @@ private:
     void saveSettings();
     void saveSubscriptions();
     void loadSubscriptions();
+    bool loadKeyFromFile();
+    bool loadChannelFromFile();
+    void loadSubscriptionsJson();
+    void saveSubscriptionsJson();
 
     // Named-channel encoding/decoding
     static QString encodeChannelName(const QString& name);   // "alice" -> 64-char hex
@@ -133,7 +142,7 @@ private:
 
     QString     m_nodeUrl   = QStringLiteral("http://localhost:8080");
     QString     m_signingKey;
-    QString     m_checkpointDir;
+    QString     m_dataDir;
     QString     m_ownChannelId;
     bool        m_connected = false;
     QString     m_status;
