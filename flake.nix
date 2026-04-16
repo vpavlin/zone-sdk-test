@@ -22,7 +22,7 @@
       inputs.logos-liblogos.follows = "logos-liblogos";
     };
     zone-sequencer-rs = {
-      url = "github:vpavlin/zone-sequencer-rs/e951162";
+      url = "github:vpavlin/zone-sequencer-rs/be351f9";
       flake = false;
     };
   };

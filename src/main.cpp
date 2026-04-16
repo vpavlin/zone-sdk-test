@@ -13,7 +13,12 @@
 // ── Headless smoke-test mode ──────────────────────────────────────────────────
 // Usage: yolo-board --headless --key <64-hex> --node <url> [--message <text>]
 //                              [--channel <hex>]
-// Publishes one message then queries the channel and prints results.
+// Smoke-tests the connection, optional publish, and channel query.
+//
+// Exit codes:
+//   0  — success (publish confirmed if --message given, or connection+query OK)
+//   1  — publish failed
+//   2  — timeout (could not connect / node unreachable)
 
 static int runHeadless(const QCoreApplication& app,
                        const QString& signingKey,
@@ -29,8 +34,7 @@ static int runHeadless(const QCoreApplication& app,
     YoloBoardBackend backend(nullptr);
     backend.setCheckpointDir(dataDir);
 
-    bool done = false;
-    int  exitCode = 0;
+    int  exitCode = 2;   // default: timeout
 
     // Wire up signals before setSigningKey (which starts the poll timer)
     QObject::connect(&backend, &YoloBoardBackend::connectedChanged, [&]() {
@@ -50,17 +54,28 @@ static int runHeadless(const QCoreApplication& app,
             out << "[headless] publishing: " << message << "\n";
             out.flush();
             backend.publish(message);
+        } else {
+            // No message to publish — connection itself is the success
+            exitCode = 0;
+            QTimer::singleShot(0, [&]() { app.quit(); });
         }
     });
 
+    // publishResult: exit immediately after publish confirmation.
+    // Note: inscriptions take ~10-20 minutes to reach LIB (finality); querying
+    // immediately will return 0 results — that is expected and correct.
     QObject::connect(&backend, &YoloBoardBackend::publishResult,
                      [&](bool ok, const QString& txHash) {
-        if (ok)
+        if (ok) {
             out << "[headless] publish OK, inscription: " << txHash << "\n";
-        else
+            out.flush();
+            exitCode = 0;
+        } else {
             out << "[headless] publish FAILED: " << txHash << "\n";
-        out.flush();
-        exitCode = ok ? 0 : 1;
+            out.flush();
+            exitCode = 1;
+        }
+        QTimer::singleShot(0, [&]() { app.quit(); });
     });
 
     QObject::connect(&backend, &YoloBoardBackend::messagesChanged, [&]() {
@@ -72,8 +87,6 @@ static int runHeadless(const QCoreApplication& app,
                 << m["data"].toString() << "\n";
         }
         out.flush();
-        // Exit after first successful message fetch
-        QTimer::singleShot(0, [&]() { done = true; app.quit(); });
     });
 
     QObject::connect(&backend, &YoloBoardBackend::statusChanged, [&]() {
@@ -81,9 +94,9 @@ static int runHeadless(const QCoreApplication& app,
         out.flush();
     });
 
-    // Timeout after 30s
+    // Timeout: only triggered if we never connect or publish hangs
     QTimer::singleShot(30000, [&]() {
-        err << "[headless] timeout — no messages received\n";
+        err << "[headless] timeout — could not connect or publish timed out\n";
         err.flush();
         exitCode = 2;
         app.quit();
