@@ -28,11 +28,11 @@ static int runHeadless(const QCoreApplication& app,
 {
     QTextStream out(stdout), err(stderr);
 
-    QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    QDir().mkpath(dataDir);
+    // Create the default app-data dir so Qt doesn't warn, but don't pass it to the
+    // backend — the backend loads its data dir from QSettings (set by the setup dialog).
+    QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
 
     YoloBoardBackend backend(nullptr);
-    backend.setDataDir(dataDir);
 
     int  exitCode = 2;   // default: timeout
 
@@ -148,10 +148,10 @@ int main(int argc, char* argv[]) {
     }
 
     // ── GUI path ──────────────────────────────────────────────────────────────
+    // Create app-data dir but don't pass it to backend; the backend loads its data
+    // dir from QSettings (set by the setup dialog, persisted across sessions).
+    QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
     YoloBoardBackend backend(nullptr);
-    QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    QDir().mkpath(dataDir);
-    backend.setDataDir(dataDir);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("backend", &backend);

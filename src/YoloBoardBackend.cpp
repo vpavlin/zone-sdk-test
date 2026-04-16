@@ -249,7 +249,17 @@ void YoloBoardBackend::loadSettings() {
     QString node    = s.value("nodeUrl", m_nodeUrl).toString();
     QString dataDir = s.value("dataDir").toString();
     if (!node.isEmpty()) m_nodeUrl = node;
-    if (!dataDir.isEmpty() && m_dataDir.isEmpty()) m_dataDir = dataDir;
+    // Only accept a saved dataDir if it actually has the signing key file.
+    // This prevents the app-data-dir (set by older code versions) from being used
+    // as if it were a configured TUI data directory.
+    if (!dataDir.isEmpty() && m_dataDir.isEmpty()) {
+        if (QFile::exists(dataDir + "/sequencer.key")) {
+            m_dataDir = dataDir;
+        } else {
+            qInfo() << "Saved dataDir has no sequencer.key, ignoring:" << dataDir;
+            s.remove("dataDir");   // clear the stale entry
+        }
+    }
     // Try to initialise from file-based config
     initZoneSequencer();
 }
