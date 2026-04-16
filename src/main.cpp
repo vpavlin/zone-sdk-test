@@ -3,6 +3,8 @@
 #include <QQmlContext>
 #include <QUrl>
 #include <QIcon>
+#include <QStandardPaths>
+#include <QDir>
 #include "YoloBoardBackend.h"
 
 int main(int argc, char* argv[]) {
@@ -12,6 +14,11 @@ int main(int argc, char* argv[]) {
     app.setOrganizationName("logos");
 
     YoloBoardBackend backend(nullptr);  // standalone: no LogosAPI
+    // Store checkpoint in ~/.local/share/logos/Yolo Board/ so sequence state
+    // survives restarts; without this every publish starts "fresh" (seq=0).
+    QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(dataDir);
+    backend.setCheckpointDir(dataDir);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("backend", &backend);
