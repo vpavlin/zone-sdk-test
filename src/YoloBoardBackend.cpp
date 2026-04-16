@@ -328,12 +328,15 @@ void YoloBoardBackend::initZoneSequencer() {
             if (!m_dataDir.isEmpty())
                 invokeZone("set_checkpoint_path", {m_dataDir + "/sequencer.checkpoint"});
             m_ownChannelId = invokeZone("get_channel_id").toString();
+            if (!m_ownChannelId.isEmpty() && !m_ownChannelId.startsWith("Error:"))
+                invokeZone("set_channel_id", {m_ownChannelId});
         }
     } else if (!isStandalone()) {
         invokeZone("set_node_url", {m_nodeUrl});
         invokeZone("set_signing_key", {m_signingKey});
         if (!m_dataDir.isEmpty())
             invokeZone("set_checkpoint_path", {m_dataDir + "/sequencer.checkpoint"});
+        invokeZone("set_channel_id", {m_ownChannelId});
     }
 
     if (m_ownChannelId.isEmpty() || m_ownChannelId.startsWith("Error:")) {
