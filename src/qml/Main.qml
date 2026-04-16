@@ -105,72 +105,116 @@ ApplicationWindow {
                         clip: true
                         model: backend.channels
 
-                        delegate: Rectangle {
+                        delegate: Column {
+                            id: chDelegate
                             width: channelList.width
-                            height: 38
-                            color: index === backend.currentChannelIndex
-                                   ? root.highlightColor : "transparent"
 
-                            MouseArea {
-                                anchors.fill: parent
-                                onClicked: backend.currentChannelIndex = index
-                            }
+                            property real backfillProg: backend.backfillProgress[modelData] || -1
+                            property bool backfilling: backfillProg >= 0
 
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 6
-                                spacing: 4
+                            // ── Channel row ───────────────────────────────
+                            Rectangle {
+                                width: chDelegate.width
+                                height: 38
+                                color: index === backend.currentChannelIndex
+                                       ? root.highlightColor : "transparent"
 
-                                Text {
-                                    Layout.fillWidth: true
-                                    // Show human-readable name for logos:yolo:* channels
-                                    text: (modelData === backend.ownChannelId ? "[you] " : "")
-                                          + backend.channelDisplayName(modelData)
-                                    color: index === backend.currentChannelIndex
-                                           ? "white" : root.textColor
-                                    font.pixelSize: 11
-                                    elide: Text.ElideRight
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: backend.currentChannelIndex = index
                                 }
 
-                                // Backfill spinner / button
-                                Rectangle {
-                                    property real prog: backend.backfillProgress[modelData] || -1
-                                    property bool backfilling: prog >= 0
-                                    visible: backfilling || (index === backend.currentChannelIndex)
-                                    width: 18; height: 18; radius: 9
-                                    color: backfilling ? "#4488ff" : "transparent"
-                                    border.color: backfilling ? "transparent" : root.mutedColor
-                                    border.width: backfilling ? 0 : 1
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8
+                                    anchors.rightMargin: 6
+                                    spacing: 4
+
                                     Text {
-                                        anchors.centerIn: parent
-                                        text: "⟳"
-                                        color: parent.backfilling ? "white" : root.mutedColor
+                                        Layout.fillWidth: true
+                                        text: (modelData === backend.ownChannelId ? "[you] " : "")
+                                              + backend.channelDisplayName(modelData)
+                                        color: index === backend.currentChannelIndex
+                                               ? "white" : root.textColor
                                         font.pixelSize: 11
+                                        elide: Text.ElideRight
                                     }
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        onClicked: {
-                                            if (parent.backfilling)
-                                                backend.stopBackfill(modelData)
-                                            else
-                                                backend.startBackfill(modelData)
+
+                                    // Backfill ⟳ button
+                                    Rectangle {
+                                        visible: chDelegate.backfilling ||
+                                                 (index === backend.currentChannelIndex)
+                                        width: 18; height: 18; radius: 9
+                                        color: chDelegate.backfilling ? "#4488ff" : "transparent"
+                                        border.color: chDelegate.backfilling ? "transparent" : root.mutedColor
+                                        border.width: chDelegate.backfilling ? 0 : 1
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "⟳"
+                                            color: chDelegate.backfilling ? "white" : root.mutedColor
+                                            font.pixelSize: 11
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: {
+                                                if (chDelegate.backfilling)
+                                                    backend.stopBackfill(modelData)
+                                                else
+                                                    backend.startBackfill(modelData)
+                                            }
+                                        }
+                                    }
+
+                                    // Unread badge
+                                    Rectangle {
+                                        visible: (backend.unreadCounts[modelData] || 0) > 0
+                                        width: 20; height: 18; radius: 9
+                                        color: "#e94560"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: backend.unreadCounts[modelData] || 0
+                                            color: "white"
+                                            font.pixelSize: 10
+                                            font.bold: true
                                         }
                                     }
                                 }
+                            }
 
-                                // Unread badge
+                            // ── Progress bar (visible only while backfilling) ──
+                            Item {
+                                visible: chDelegate.backfilling
+                                width: chDelegate.width
+                                height: visible ? 14 : 0
+
+                                // Track
                                 Rectangle {
-                                    visible: (backend.unreadCounts[modelData] || 0) > 0
-                                    width: 20; height: 18; radius: 9
-                                    color: "#e94560"
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: backend.unreadCounts[modelData] || 0
-                                        color: "white"
-                                        font.pixelSize: 10
-                                        font.bold: true
+                                    anchors.left: parent.left
+                                    anchors.right: pctLabel.left
+                                    anchors.rightMargin: 3
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    height: 3
+                                    color: root.accentColor
+                                    radius: 1
+
+                                    // Fill
+                                    Rectangle {
+                                        width: chDelegate.backfillProg * parent.width
+                                        height: parent.height
+                                        color: "#4488ff"
+                                        radius: 1
+                                        Behavior on width { SmoothedAnimation { velocity: 80 } }
                                     }
+                                }
+
+                                Text {
+                                    id: pctLabel
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 4
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: Math.round(chDelegate.backfillProg * 100) + "%"
+                                    color: root.mutedColor
+                                    font.pixelSize: 9
                                 }
                             }
                         }
