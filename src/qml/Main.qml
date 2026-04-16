@@ -12,7 +12,7 @@ ApplicationWindow {
     title: "Yolo Board"
     color: "#1a1a2e"
 
-    // ── Fonts / colours (fallback when Logos.Theme not available) ─────────────
+    // ── Colours ───────────────────────────────────────────────────────────────
     readonly property color bgColor:       "#1a1a2e"
     readonly property color panelColor:    "#16213e"
     readonly property color accentColor:   "#0f3460"
@@ -21,9 +21,10 @@ ApplicationWindow {
     readonly property color mutedColor:    "#888"
     readonly property color ownMsgColor:   "#c8f7c5"
     readonly property color otherMsgColor: "#eaeaea"
+    readonly property color pendingColor:  "#888"
+    readonly property color failedColor:   "#ff4444"
     readonly property int   baseFontPx:    13
 
-    // ── Setup dialog (shown when no signing key) ───────────────────────────────
     property bool showSetup: backend.ownChannelId === ""
 
     // ── Header ────────────────────────────────────────────────────────────────
@@ -43,28 +44,23 @@ ApplicationWindow {
                 spacing: 8
 
                 Rectangle {
-                    width: 8; height: 8
-                    radius: 4
+                    width: 8; height: 8; radius: 4
                     color: backend.connected ? "#44ff44" : "#ff4444"
                 }
-
                 Text {
                     text: "Yolo Board"
                     color: root.textColor
                     font.pixelSize: 15
                     font.bold: true
                 }
-
                 Item { Layout.fillWidth: true }
-
                 Text {
-                    text: backend.ownChannelId.length > 12
-                          ? "Channel: " + backend.ownChannelId.substring(0, 12) + "..."
+                    text: backend.ownChannelId.length > 0
+                          ? "Channel: " + backend.channelDisplayName(backend.ownChannelId)
                           : "Not configured"
                     color: root.mutedColor
                     font.pixelSize: 11
                 }
-
                 Text {
                     text: backend.nodeUrl
                     color: root.mutedColor
@@ -73,7 +69,7 @@ ApplicationWindow {
             }
         }
 
-        // ── Main body ────────────────────────────────────────────────────────
+        // ── Main body ─────────────────────────────────────────────────────────
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -93,7 +89,6 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         height: 30
                         color: root.accentColor
-
                         Text {
                             anchors.centerIn: parent
                             text: "Channels"
@@ -129,13 +124,12 @@ ApplicationWindow {
 
                                 Text {
                                     Layout.fillWidth: true
-                                    text: modelData.length > 14
-                                          ? modelData.substring(0, 14) + "…"
-                                          : modelData
+                                    // Show human-readable name for logos:yolo:* channels
+                                    text: (modelData === backend.ownChannelId ? "[you] " : "")
+                                          + backend.channelDisplayName(modelData)
                                     color: index === backend.currentChannelIndex
                                            ? "white" : root.textColor
                                     font.pixelSize: 11
-                                    font.family: "monospace"
                                     elide: Text.ElideRight
                                 }
 
@@ -144,7 +138,6 @@ ApplicationWindow {
                                     visible: (backend.unreadCounts[modelData] || 0) > 0
                                     width: 20; height: 18; radius: 9
                                     color: "#e94560"
-
                                     Text {
                                         anchors.centerIn: parent
                                         text: backend.unreadCounts[modelData] || 0
@@ -171,9 +164,8 @@ ApplicationWindow {
                             TextField {
                                 id: subInput
                                 Layout.fillWidth: true
-                                placeholderText: "Channel ID to subscribe…"
+                                placeholderText: "Name or hex channel ID…"
                                 font.pixelSize: 10
-                                font.family: "monospace"
                                 color: root.textColor
                                 background: Rectangle { color: "#0a0a1a"; radius: 3 }
                                 Keys.onReturnPressed: doSubscribe()
@@ -203,13 +195,12 @@ ApplicationWindow {
                 }
             }
 
-            // ── Message area ─────────────────────────────────────────────────
+            // ── Message area ──────────────────────────────────────────────────
             ColumnLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: 0
 
-                // Messages list
                 ListView {
                     id: messageList
                     Layout.fillWidth: true
@@ -221,10 +212,12 @@ ApplicationWindow {
 
                     delegate: Rectangle {
                         width: messageList.width
-                        height: msgText.implicitHeight + 16
+                        height: msgCol.implicitHeight + 14
                         color: "transparent"
 
-                        readonly property bool isOwn: modelData.isOwn === true
+                        readonly property bool isOwn:    modelData.isOwn    === true
+                        readonly property bool isPending: modelData.pending  === true
+                        readonly property bool isFailed:  modelData.failed   === true
 
                         RowLayout {
                             anchors.fill: parent
@@ -241,22 +234,48 @@ ApplicationWindow {
                             }
 
                             Column {
+                                id: msgCol
                                 Layout.fillWidth: true
                                 spacing: 2
 
+                                // Sender / state label
                                 Text {
-                                    text: (isOwn ? "you" : modelData.channel.substring(0, 8) + "…")
-                                    color: isOwn ? root.highlightColor : root.mutedColor
+                                    text: {
+                                        var sender = isOwn
+                                            ? "you"
+                                            : modelData.channel.substring(0, 8) + "…"
+                                        if (isPending) return sender + " [sending…]"
+                                        if (isFailed)  return sender + " [failed]"
+                                        return sender
+                                    }
+                                    color: isFailed ? root.failedColor
+                                                    : (isOwn ? root.highlightColor : root.mutedColor)
                                     font.pixelSize: 10
                                 }
 
+                                // Message body
                                 Text {
                                     id: msgText
                                     width: parent.width
                                     text: modelData.data || ""
-                                    color: isOwn ? root.ownMsgColor : root.otherMsgColor
+                                    color: isFailed  ? root.failedColor
+                                         : isPending ? root.pendingColor
+                                         : isOwn     ? root.ownMsgColor
+                                         :             root.otherMsgColor
                                     font.pixelSize: root.baseFontPx
+                                    font.strikeout: isFailed
                                     wrapMode: Text.Wrap
+                                    opacity: isPending ? 0.6 : 1.0
+                                }
+
+                                // Timestamp
+                                Text {
+                                    id: tsText
+                                    visible: (modelData.timestamp || "").length > 0
+                                    text: modelData.timestamp || ""
+                                    color: root.mutedColor
+                                    font.pixelSize: 9
+                                    opacity: 0.7
                                 }
                             }
                         }
@@ -304,7 +323,6 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     height: 22
                     color: "#0a0a1a"
-
                     Text {
                         anchors.left: parent.left
                         anchors.leftMargin: 8
@@ -339,15 +357,13 @@ ApplicationWindow {
                 font.pixelSize: 15
                 font.bold: true
             }
-
             Text {
-                text: "Enter your Ed25519 signing key (64-char hex) and node URL to connect."
+                text: "Enter your Ed25519 signing key (64-char hex) and node URL."
                 color: root.mutedColor
                 font.pixelSize: 11
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
-
             TextField {
                 id: keyInput
                 Layout.fillWidth: true
@@ -358,7 +374,6 @@ ApplicationWindow {
                 background: Rectangle { color: root.accentColor; radius: 3 }
                 echoMode: TextInput.Password
             }
-
             TextField {
                 id: nodeInput
                 Layout.fillWidth: true
@@ -368,7 +383,6 @@ ApplicationWindow {
                 text: backend.nodeUrl
                 background: Rectangle { color: root.accentColor; radius: 3 }
             }
-
             Button {
                 Layout.fillWidth: true
                 text: "Connect"
@@ -400,11 +414,10 @@ ApplicationWindow {
         }
     }
 
-    // Auto-scroll on new messages
     Connections {
         target: backend
         function onMessagesChanged() {
             messageList.positionViewAtBeginning()
         }
     }
-} // ApplicationWindow
+}

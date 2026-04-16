@@ -7,7 +7,15 @@
 #include <QVariantMap>
 #include <QTimer>
 #include <QMap>
+#include <QSet>
 #include <QSettings>
+#include <QFile>
+#include <QDir>
+#include <QUuid>
+#include <QDateTime>
+#include <QRegularExpression>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 
 // Direct Rust FFI — used in standalone mode (no LogosAPI)
 extern "C" {
@@ -50,7 +58,7 @@ public:
     QVariantMap unreadCounts() const;
     QString nodeUrl() const { return m_nodeUrl; }
 
-    Q_INVOKABLE void subscribe(const QString& channelId);
+    Q_INVOKABLE void subscribe(const QString& channelIdOrName);
     Q_INVOKABLE void unsubscribe(const QString& channelId);
     Q_INVOKABLE void publish(const QString& message);
     Q_INVOKABLE void setCurrentChannelIndex(int index);
@@ -59,6 +67,9 @@ public:
     Q_INVOKABLE void setCheckpointDir(const QString& dir);
     Q_INVOKABLE QString currentChannelId() const;
     Q_INVOKABLE void clearUnread(const QString& channelId);
+
+    // Named-channel helpers — callable from QML for display
+    Q_INVOKABLE QString channelDisplayName(const QString& channelId) const;
 
 signals:
     void channelsChanged();
@@ -75,17 +86,31 @@ private slots:
     void pollMessages();
 
 private:
-    bool isStandalone() const;   // true when running without LogosAPI
+    bool isStandalone() const;
 
-    // Call zone_sequencer module via LogosAPI
-    QVariant invokeZone(const QString& method,
-                        const QVariantList& args = {});
+    QVariant invokeZone(const QString& method, const QVariantList& args = {});
 
     void fetchAndMergeMessages(const QString& channelId);
     void setStatus(const QString& msg);
     void initZoneSequencer();
     void loadSettings();
     void saveSettings();
+    void saveSubscriptions();
+    void loadSubscriptions();
+
+    // Named-channel encoding/decoding
+    static QString encodeChannelName(const QString& name);   // "alice" -> 64-char hex
+    static QString decodeChannelName(const QString& hexId);  // hex -> "alice" or ""
+
+    // Disk cache
+    QString cacheFilePath(const QString& channelId) const;
+    void saveCacheForChannel(const QString& channelId);
+    void loadCacheForChannel(const QString& channelId);
+
+    // Async publish
+    void onPublishFinished(QFutureWatcher<QString>* watcher,
+                           const QString& channelId,
+                           const QString& pendingMsgId);
 
     LogosAPI*         m_logosAPI = nullptr;
     LogosAPIClient*   m_zoneClient = nullptr;
@@ -98,15 +123,18 @@ private:
     QString     m_status;
     int         m_currentChannelIndex = 0;
 
-    QStringList                 m_channels;        // list of channel IDs we track
-    QMap<QString, QVariantList> m_messages;        // channelId -> message list
-    QMap<QString, int>          m_unreadCounts;    // channelId -> unread count
-    QMap<QString, QString>      m_lastSeenId;      // channelId -> last message ID seen
+    QStringList                 m_channels;
+    QMap<QString, QVariantList> m_messages;
+    QMap<QString, int>          m_unreadCounts;
+    QMap<QString, QString>      m_lastSeenId;
+
+    QList<QFutureWatcher<QString>*> m_publishWatchers;
 
     QTimer* m_pollTimer = nullptr;
-    static constexpr int kPollIntervalMs = 3000;
+    static constexpr int kPollIntervalMs   = 3000;
+    static constexpr int kQueryLimit       = 50;
+    static constexpr int kMaxCachedMsgs    = 200;
 
-    static constexpr int kQueryLimit = 50;
     static const char* kZoneModuleName;
     static const char* kZoneObjectName;
 };
