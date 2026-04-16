@@ -100,7 +100,8 @@ private:
 
     QVariant invokeZone(const QString& method, const QVariantList& args = {});
 
-    void fetchAndMergeMessages(const QString& channelId);
+    void fetchMessagesAsync(const QString& channelId);
+    void mergeMessages(const QString& channelId, const QString& json);
     void setStatus(const QString& msg);
     void initZoneSequencer();
     void loadSettings();
@@ -143,6 +144,7 @@ private:
     QMap<QString, QString>      m_lastSeenId;
 
     QList<QFutureWatcher<QString>*> m_publishWatchers;
+    QSet<QString> m_fetchingChannels;   // channels with an in-flight poll
 
     // Backfill state: channelId → cancel flag
     QMap<QString, std::shared_ptr<std::atomic<bool>>> m_backfillCancelled;

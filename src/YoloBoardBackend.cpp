@@ -153,7 +153,7 @@ void YoloBoardBackend::loadSubscriptions() {
         m_channels.append(ch);
         m_unreadCounts[ch] = 0;
         loadCacheForChannel(ch);
-        fetchAndMergeMessages(ch);
+        fetchMessagesAsync(ch);
         changed = true;
     }
     if (changed) emit channelsChanged();
@@ -315,7 +315,7 @@ void YoloBoardBackend::subscribe(const QString& input) {
     saveSubscriptions();
     setStatus("Subscribed to " + channelDisplayName(channelId));
     loadCacheForChannel(channelId);
-    fetchAndMergeMessages(channelId);
+    fetchMessagesAsync(channelId);
 }
 
 void YoloBoardBackend::unsubscribe(const QString& channelId) {
@@ -328,6 +328,7 @@ void YoloBoardBackend::unsubscribe(const QString& channelId) {
     m_messages.remove(channelId);
     m_unreadCounts.remove(channelId);
     m_lastSeenId.remove(channelId);
+    m_fetchingChannels.remove(channelId);
     if (m_currentChannelIndex >= m_channels.size())
         m_currentChannelIndex = qMax(0, m_channels.size() - 1);
     emit currentChannelIndexChanged();
@@ -444,7 +445,7 @@ void YoloBoardBackend::onPublishFinished(QFutureWatcher<QString>* watcher,
     if (ok) {
         setStatus("Published: " + txHash.left(12) + "…");
         emit publishResult(true, txHash);
-        fetchAndMergeMessages(channelId);
+        fetchMessagesAsync(channelId);
     } else {
         setStatus("Publish failed: " + txHash);
         emit publishResult(false, txHash);
@@ -456,20 +457,48 @@ void YoloBoardBackend::onPublishFinished(QFutureWatcher<QString>* watcher,
 
 void YoloBoardBackend::pollMessages() {
     for (const QString& channelId : m_channels)
-        fetchAndMergeMessages(channelId);
+        fetchMessagesAsync(channelId);
 }
 
-void YoloBoardBackend::fetchAndMergeMessages(const QString& channelId) {
-    QString json;
-    if (isStandalone()) {
-        char* raw = zone_query_channel(
-            m_nodeUrl.toUtf8().constData(),
-            channelId.toUtf8().constData(),
-            kQueryLimit);
-        if (raw) { json = QString::fromUtf8(raw); zone_free_string(raw); }
-    } else {
-        json = invokeZone("query_channel", {channelId, kQueryLimit}).toString();
-    }
+// Kick off a background fetch for channelId (no-op if one is already in flight).
+void YoloBoardBackend::fetchMessagesAsync(const QString& channelId) {
+    if (m_fetchingChannels.contains(channelId)) return;
+    m_fetchingChannels.insert(channelId);
+
+    QString nodeUrl  = m_nodeUrl;
+    int     limit    = kQueryLimit;
+    bool    standalone = isStandalone();
+
+    QThreadPool::globalInstance()->start([this, channelId, nodeUrl, limit, standalone]() {
+        QString json;
+        if (standalone) {
+            char* raw = zone_query_channel(
+                nodeUrl.toUtf8().constData(),
+                channelId.toUtf8().constData(),
+                limit);
+            if (raw) { json = QString::fromUtf8(raw); zone_free_string(raw); }
+        } else {
+            // LogosAPI path: invokeZone is not thread-safe, so marshal back to main thread
+            // and do a blocking invoke there instead.  For now this path stays synchronous;
+            // it only affects plugin mode which has its own threading model.
+            QMetaObject::invokeMethod(this, [this, channelId, limit]() {
+                QString j = invokeZone("query_channel", {channelId, limit}).toString();
+                mergeMessages(channelId, j);
+                m_fetchingChannels.remove(channelId);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        // Marshal result back to main thread for safe state mutation
+        QMetaObject::invokeMethod(this, [this, channelId, json]() {
+            mergeMessages(channelId, json);
+            m_fetchingChannels.remove(channelId);
+        }, Qt::QueuedConnection);
+    });
+}
+
+// Merge a JSON array of messages into m_messages[channelId]. Must run on the main thread.
+void YoloBoardBackend::mergeMessages(const QString& channelId, const QString& json) {
     if (json.isEmpty() || json == "[]") return;
 
     QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
