@@ -22,12 +22,20 @@
 
 // Direct Rust FFI — used in standalone mode (no LogosAPI)
 extern "C" {
+    // Legacy stateless publish (kept for backward compat)
     char* zone_publish(const char* node_url, const char* channel_id_hex,
                        const char* signing_key_hex,
                        const char* data, const char* checkpoint_path);
     char* zone_query_channel(const char* node_url, const char* channel_id_hex, int limit);
     char* zone_query_channel_paged(const char* node_url, const char* channel_id_hex,
                                    const char* cursor_json, int limit);
+    // Persistent sequencer handle
+    void* zone_sequencer_create(const char* node_url, const char* channel_id_hex,
+                                const char* signing_key_hex, const char* checkpoint_path);
+    char* zone_sequencer_publish(void* handle, const char* data);
+    char* zone_sequencer_checkpoint(void* handle);
+    void  zone_sequencer_destroy(void* handle);
+
     void  zone_free_string(char* s);
 }
 
@@ -140,6 +148,7 @@ private:
 
     LogosAPI*         m_logosAPI = nullptr;
     LogosAPIClient*   m_zoneClient = nullptr;
+    void*             m_sequencerHandle = nullptr;  // persistent Rust sequencer
 
     QString     m_nodeUrl   = QStringLiteral("http://localhost:8080");
     QString     m_signingKey;

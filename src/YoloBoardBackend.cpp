@@ -247,6 +247,12 @@ YoloBoardBackend::~YoloBoardBackend() {
     // than timing out, because even calling invokeMethod with a destroyed
     // `this` is UB.
     QThreadPool::globalInstance()->waitForDone(-1);
+
+    // Destroy the persistent Rust sequencer (drops the background actor)
+    if (m_sequencerHandle) {
+        zone_sequencer_destroy(m_sequencerHandle);
+        m_sequencerHandle = nullptr;
+    }
 }
 
 // ── Settings persistence ──────────────────────────────────────────────────────
@@ -342,6 +348,21 @@ void YoloBoardBackend::initZoneSequencer() {
         emit channelsChanged();
     }
     loadCacheForChannel(m_ownChannelId);
+
+    // Create persistent sequencer handle (standalone mode only)
+    if (isStandalone() && !m_sequencerHandle) {
+        QString ckptPath = m_dataDir.isEmpty()
+                           ? "" : m_dataDir + "/sequencer.checkpoint";
+        m_sequencerHandle = zone_sequencer_create(
+            m_nodeUrl.toUtf8().constData(),
+            m_ownChannelId.toUtf8().constData(),
+            m_signingKey.toUtf8().constData(),
+            ckptPath.toUtf8().constData());
+        if (m_sequencerHandle)
+            qInfo() << "YoloBoardBackend: persistent sequencer created";
+        else
+            qWarning() << "YoloBoardBackend: failed to create persistent sequencer";
+    }
 
     m_connected = true;
     emit connectedChanged();
@@ -483,22 +504,17 @@ void YoloBoardBackend::publish(const QString& message) {
     setStatus("Publishing…");
 
     if (isStandalone()) {
-        // Run zone_publish in a background thread so the UI stays responsive
-        QString nodeUrl   = m_nodeUrl;
-        QString channelId = m_ownChannelId;
-        QString sigKey    = m_signingKey;
-        QString ckptPath  = m_dataDir.isEmpty()
-                            ? "" : m_dataDir + "/sequencer.checkpoint";
+        if (!m_sequencerHandle) { setStatus("Sequencer not ready"); return; }
+
+        // Use the persistent sequencer handle in a background thread
+        void* handle = m_sequencerHandle;
 
         auto* watcher = new QFutureWatcher<QString>(this);
         m_publishWatchers.append(watcher);
 
         QFuture<QString> future = QtConcurrent::run([=]() -> QString {
-            char* raw = zone_publish(nodeUrl.toUtf8().constData(),
-                                     channelId.toUtf8().constData(),
-                                     sigKey.toUtf8().constData(),
-                                     message.toUtf8().constData(),
-                                     ckptPath.toUtf8().constData());
+            char* raw = zone_sequencer_publish(handle,
+                                               message.toUtf8().constData());
             if (!raw) return {};
             QString result = QString::fromUtf8(raw);
             zone_free_string(raw);
@@ -596,11 +612,21 @@ void YoloBoardBackend::fetchMessagesAsync(const QString& channelId) {
         }
 
         // Marshal result back to main thread for safe state mutation
+        bool queryOk = !json.isEmpty();
         if (!alive->load()) return;
-        QMetaObject::invokeMethod(this, [this, alive, channelId, json]() {
+        QMetaObject::invokeMethod(this, [this, alive, channelId, json, queryOk]() {
             if (!alive->load()) return;
             mergeMessages(channelId, json);
             m_fetchingChannels.remove(channelId);
+            // Track connection state from query success/failure
+            if (queryOk && !m_connected) {
+                m_connected = true;
+                emit connectedChanged();
+            } else if (!queryOk && m_connected && m_fetchingChannels.isEmpty()) {
+                m_connected = false;
+                emit connectedChanged();
+                setStatus("Connection lost");
+            }
         }, Qt::QueuedConnection);
     });
 }
@@ -624,20 +650,40 @@ void YoloBoardBackend::mergeMessages(const QString& channelId, const QString& js
         QString id = obj["id"].toString();
         if (seenIds.contains(id)) continue;
 
-        QVariantMap msg;
-        msg["id"]        = id;
-        msg["data"]      = obj["data"].toString();
-        msg["channel"]   = channelId;
-        msg["isOwn"]     = (channelId == m_ownChannelId);
-        msg["timestamp"] = QDateTime::currentDateTime().toString("HH:mm:ss");
-        msg["pending"]   = false;
-        msg["failed"]    = false;
-        existing.append(msg);
+        QString text = obj["data"].toString();
+
+        // Confirm a matching pending message in-place (like TUI does)
+        bool confirmedPending = false;
+        for (int i = 0; i < existing.size(); ++i) {
+            QVariantMap m = existing[i].toMap();
+            if ((m.value("pending").toBool() || m.value("failed").toBool())
+                && m.value("data").toString() == text) {
+                m["pending"] = false;
+                m["failed"]  = false;
+                m["id"]      = id;
+                existing[i]  = m;
+                confirmedPending = true;
+                break;
+            }
+        }
+
+        if (!confirmedPending) {
+            QVariantMap msg;
+            msg["id"]        = id;
+            msg["data"]      = text;
+            msg["channel"]   = channelId;
+            msg["isOwn"]     = (channelId == m_ownChannelId);
+            msg["timestamp"] = QDateTime::currentDateTime().toString("HH:mm:ss");
+            msg["pending"]   = false;
+            msg["failed"]    = false;
+            existing.append(msg);
+
+            if (channelId != currentChannelId())
+                m_unreadCounts[channelId] = m_unreadCounts.value(channelId, 0) + 1;
+        }
+
         seenIds.insert(id);
         added = true;
-
-        if (channelId != currentChannelId())
-            m_unreadCounts[channelId] = m_unreadCounts.value(channelId, 0) + 1;
     }
 
     if (added) {
