@@ -774,13 +774,27 @@ void YoloBoardBackend::fetchMedia(const QString& cid) {
 #ifdef LOGOS_CORE_AVAILABLE
     if (m_storageClient && m_storageStarted && !cachePath.isEmpty()) {
         QDir().mkpath(mediaCacheDir());
-        QVariant result = invokeStorage("downloadToUrl", {cid, cachePath, false, (qlonglong)0});
-        qInfo() << "Storage downloadToUrl result:" << result;
-        m_fetchingMedia.remove(cid);
-        if (QFile::exists(cachePath)) {
-            emit mediaReady(cid, cachePath);
-            emit messagesChanged();
-        }
+        QString resultStr = invokeStorage("downloadFile", {cid, cachePath, false}).toString();
+        qInfo() << "Storage downloadFile result:" << resultStr;
+        // downloadFile is async — file appears after storageDownloadDone event
+        // Poll for the file with a timer
+        auto* timer = new QTimer(this);
+        int* attempts = new int(0);
+        timer->setInterval(1000);
+        connect(timer, &QTimer::timeout, this, [this, timer, attempts, cid, cachePath]() {
+            (*attempts)++;
+            if (QFile::exists(cachePath) && QFileInfo(cachePath).size() > 0) {
+                timer->stop(); timer->deleteLater(); delete attempts;
+                m_fetchingMedia.remove(cid);
+                emit mediaReady(cid, cachePath);
+                emit messagesChanged();
+            } else if (*attempts >= 30) {
+                timer->stop(); timer->deleteLater(); delete attempts;
+                m_fetchingMedia.remove(cid);
+                qWarning() << "fetchMedia timed out for" << cid;
+            }
+        });
+        timer->start();
         return;
     }
 #endif
