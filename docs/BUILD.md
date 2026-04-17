@@ -34,6 +34,8 @@ git clone -b ipc-fixes git@github.com:vpavlin/logos-liblogos.git
 git clone -b fix-ipc-shadowing git@github.com:vpavlin/logos-capability-module.git
 ```
 
+> **Note:** The tester also needs Logos Basecamp pre-built. The `capability_module` fork fixes an IPC bug in the upstream module — without it, inter-module communication fails.
+
 ## Build Steps
 
 ### 1. Build zone-sequencer module
@@ -60,7 +62,15 @@ nix build .#plugin -o result-plugin
 cd ..
 ```
 
-### 4. Build logos-liblogos (patched logos_host)
+### 4. Build capability module (IPC fix)
+
+```bash
+cd logos-capability-module
+nix build
+cd ..
+```
+
+### 5. Build logos-liblogos (patched logos_host)
 
 This is needed for the `LogosResult` → JSON serialization fix and the `informModuleToken` retry logic.
 
@@ -77,6 +87,20 @@ cd ..
 ```bash
 MODULES_DIR=~/.local/share/Logos/LogosBasecampDev/modules
 PLUGINS_DIR=~/.local/share/Logos/LogosBasecampDev/plugins
+
+# Capability module (IPC fix)
+mkdir -p $MODULES_DIR/capability_module
+cp logos-capability-module/result/lib/*.so $MODULES_DIR/capability_module/
+cat > $MODULES_DIR/capability_module/manifest.json << 'EOF'
+{
+  "name": "capability_module",
+  "version": "1.0.0",
+  "type": "core",
+  "main": {"linux-amd64-dev": "capability_module_plugin.so", "linux-x86_64-dev": "capability_module_plugin.so"},
+  "manifestVersion": "0.1.0",
+  "dependencies": []
+}
+EOF
 
 # Zone sequencer module
 mkdir -p $MODULES_DIR/liblogos_zone_sequencer_module
@@ -133,10 +157,24 @@ LOGOS_HOST_PATH=$(readlink -f logos-liblogos/result/bin/logos_host) \
 
 The `QML_PATH` override is optional — it lets you iterate on QML without rebuilding.
 
+## Setup Zone Data Directory
+
+If you don't have a Zone data directory yet, create one:
+
+```bash
+mkdir -p ~/zone-data
+
+# Generate a signing key (32 random bytes, hex-encoded)
+openssl rand -hex 32 > ~/zone-data/sequencer.key
+
+# Create a named channel (e.g. "logos:yolo:yourname", zero-padded to 32 bytes, hex-encoded)
+echo -n "logos:yolo:yourname" | xxd -p | head -c 64 | sed 's/$/0000000000000000000000000000/' | head -c 64 > ~/zone-data/channel.id
+```
+
 ## Usage
 
-1. Click **Yolo Board** in the Basecamp sidebar
-2. Enter the path to your Zone data directory (must contain `sequencer.key` and `channel.id`)
+1. Click **Yolo Board** in the Basecamp sidebar (note: initial load takes ~20s for IPC setup)
+2. Enter the path to your Zone data directory (e.g. `~/zone-data`)
 3. Enter the zone node URL (e.g. `http://192.168.0.203:8080`)
 4. Click **Connect**
 5. Type a message and click **Publish** — it's inscribed on-chain
