@@ -143,6 +143,19 @@ Rectangle {
         return logos.callModule("storage_module", method, args || [])
     }
 
+    function initStorage(dir) {
+        if (!basecampMode) return
+        var storageDir = dir + "/storage"
+        var cfg = JSON.stringify({"data-dir": storageDir})
+        var r1 = callStorage("init", [cfg])
+        console.log("Storage init:", r1)
+        var r2 = callStorage("start", [])
+        console.log("Storage start:", r2)
+        if (r2 && r2.indexOf("Error") < 0) {
+            storageIsReady = true
+        }
+    }
+
     function encodeChannelName(name) {
         var prefix = "logos:yolo:"
         var raw = prefix + name
@@ -222,6 +235,7 @@ Rectangle {
             isConnected = true
             statusText = "Connected to " + nodeUrl
             callZone("save_ui_config", [JSON.stringify({ dataDir: dir, nodeUrl: nodeUrl })])
+            initStorage(dir)
             loadSubscriptions()
             startPolling()
         } else {
@@ -411,9 +425,7 @@ Rectangle {
             if (api) api.startBackfill(channelId)
             return
         }
-        // Backfill disabled in Basecamp mode — logos.callModule() is synchronous
-        // and freezes the UI during network calls. Needs async IPC support.
-        statusText = "Backfill not yet available in Basecamp mode"
+        statusText = "Backfill requires async IPC (newer Basecamp)"
     }
 
     function doStopBackfill(channelId) {
@@ -428,58 +440,63 @@ Rectangle {
         backfillProgressMap = bp
     }
 
-    Timer {
-        id: backfillTimer
-        interval: 100
-        repeat: true
-        onTriggered: {
-            var channelId = backfillChannelId
-            var result = callZone("query_channel_paged", [channelId, backfillCursor, 100])
-            if (!result || result.length === 0) { doStopBackfill(channelId); return }
+    function backfillNextPage() {
+        if (!backfillRunning) return
+        var channelId = backfillChannelId
 
-            try { var root = JSON.parse(result) } catch(e) { doStopBackfill(channelId); return }
-            if (!root || typeof root !== "object") { doStopBackfill(channelId); return }
+        logos.callModuleAsync(
+            "liblogos_zone_sequencer_module", "query_channel_paged",
+            [channelId, backfillCursor, 100],
+            function(result) {
+                if (!backfillRunning || backfillChannelId !== channelId) return
+                if (!result || result.length === 0) { doStopBackfill(channelId); return }
 
-            var cursorSlot = root.cursor_slot || 0
-            var libSlot = root.lib_slot || 1
-            var done = root.done || false
-            var bp = Object.assign({}, backfillProgressMap)
-            bp[channelId] = libSlot > 0 ? Math.min(1.0, cursorSlot / libSlot) : 0
-            backfillProgressMap = bp
+                try { var root = JSON.parse(result) } catch(e) { doStopBackfill(channelId); return }
+                if (!root || typeof root !== "object") { doStopBackfill(channelId); return }
 
-            var msgs = root.messages || []
-            if (msgs.length > 0) {
-                var existing = (allMessages[channelId] || []).slice()
-                var seenIds = {}
-                for (var i = 0; i < existing.length; i++) seenIds[existing[i].id] = true
+                var cursorSlot = root.cursor_slot || 0
+                var libSlot = root.lib_slot || 1
+                var done = root.done || false
+                var bp = Object.assign({}, backfillProgressMap)
+                bp[channelId] = libSlot > 0 ? Math.min(1.0, cursorSlot / libSlot) : 0
+                backfillProgressMap = bp
 
-                var prepend = []
-                for (var j = 0; j < msgs.length; j++) {
-                    if (seenIds[msgs[j].id]) continue
-                    var parsed = parseMessagePayload(msgs[j].data)
-                    prepend.push({
-                        id: msgs[j].id, data: msgs[j].data,
-                        displayText: parsed.text, media: parsed.media,
-                        channel: channelId, isOwn: channelId === ownChannelId,
-                        timestamp: "", pending: false, failed: false
-                    })
+                var msgs = root.messages || []
+                if (msgs.length > 0) {
+                    var existing = (allMessages[channelId] || []).slice()
+                    var seenIds = {}
+                    for (var i = 0; i < existing.length; i++) seenIds[existing[i].id] = true
+
+                    var prepend = []
+                    for (var j = 0; j < msgs.length; j++) {
+                        if (seenIds[msgs[j].id]) continue
+                        var parsed = parseMessagePayload(msgs[j].data)
+                        prepend.push({
+                            id: msgs[j].id, data: msgs[j].data,
+                            displayText: parsed.text, media: parsed.media,
+                            channel: channelId, isOwn: channelId === ownChannelId,
+                            timestamp: "", pending: false, failed: false
+                        })
+                    }
+                    if (prepend.length > 0) {
+                        var am = Object.assign({}, allMessages)
+                        am[channelId] = prepend.concat(existing)
+                        allMessages = am
+                        updateMessages()
+                    }
                 }
-                if (prepend.length > 0) {
-                    var am = Object.assign({}, allMessages)
-                    am[channelId] = prepend.concat(existing)
-                    allMessages = am
-                    updateMessages()
+
+                if (done) {
+                    doStopBackfill(channelId)
+                    statusText = "Backfill complete for " + channelDisplayName(channelId)
+                    return
                 }
-            }
 
-            if (done) {
-                doStopBackfill(channelId)
-                statusText = "Backfill complete for " + channelDisplayName(channelId)
-                return
-            }
-
-            backfillCursor = JSON.stringify(root.cursor || {})
-        }
+                backfillCursor = JSON.stringify(root.cursor || {})
+                backfillNextPage()
+            },
+            60000
+        )
     }
 
     function doPublish() {
