@@ -247,20 +247,9 @@ Rectangle {
         statusText = "Uploading " + fileName + "\u2026"
 
         var result = callStorage("uploadUrl", [filePath, 65536])
-        console.log("uploadUrl:", result)
-
-        try {
-            var obj = JSON.parse(result)
-            if (!obj.success) {
-                isUploading = false
-                statusText = "Upload failed"
-                return
-            }
-        } catch(e) {
-            isUploading = false
-            statusText = "Upload failed: " + result
-            return
-        }
+        console.log("uploadUrl returned:", result)
+        // uploadUrl may return empty/async — start polling manifests regardless
+        // (the storage module fires storageUploadDone asynchronously after upload)
 
         pollManifestsTimer.fileName = fileName
         pollManifestsTimer.text = text
@@ -280,9 +269,11 @@ Rectangle {
         onTriggered: {
             attempt++
             var result = callStorage("manifests", [])
+            console.log("manifests result:", result, "type:", typeof result)
             var foundCid = ""
             try {
                 var obj = JSON.parse(result)
+                console.log("parsed manifests:", JSON.stringify(obj))
                 if (obj.success) {
                     var arr = obj.value || []
                     for (var i = 0; i < arr.length; i++) {
@@ -1053,11 +1044,58 @@ Rectangle {
                 Layout.fillHeight: true
                 spacing: 0
 
+                // Drag-and-drop area for file attachments
+                DropArea {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.preferredHeight: 0
+                    visible: false
+                    onEntered: (drag) => { drag.accept(Qt.CopyAction) }
+                    onDropped: (drop) => {
+                        if (drop.hasUrls && drop.urls.length > 0) {
+                            var p = drop.urls[0].toString()
+                            if (p.startsWith("file://")) p = p.substring(7)
+                            pendingAttachment = p
+                        }
+                    }
+                }
+
                 ListView {
                     id: messageList
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
+
+                    DropArea {
+                        anchors.fill: parent
+                        onEntered: (drag) => { drag.accept(Qt.CopyAction); dropHint.visible = true }
+                        onExited: dropHint.visible = false
+                        onDropped: (drop) => {
+                            dropHint.visible = false
+                            if (drop.hasUrls && drop.urls.length > 0) {
+                                var p = drop.urls[0].toString()
+                                if (p.startsWith("file://")) p = p.substring(7)
+                                pendingAttachment = p
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        id: dropHint
+                        visible: false
+                        anchors.fill: parent
+                        color: Qt.rgba(0.93, 0.48, 0.34, 0.15)
+                        border.color: theme.accent
+                        border.width: 2
+                        z: 100
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Drop image to attach"
+                            color: theme.accent
+                            font.pixelSize: 18
+                            font.weight: Font.Bold
+                        }
+                    }
                     spacing: 1
                     model: getMessages()
                     verticalLayoutDirection: ListView.BottomToTop
@@ -1222,7 +1260,10 @@ Rectangle {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: getPendingAttachment()
+                            text: {
+                                var p = getPendingAttachment()
+                                return p.split("/").pop()  // just the filename
+                            }
                             color: theme.textSec
                             font.pixelSize: theme.fontSecondary
                             elide: Text.ElideMiddle
@@ -1465,7 +1506,7 @@ Rectangle {
         }
     }
 
-    // ── Attach file dialog (Basecamp mode) ─────────────────────────────────
+    // ── Attach file dialog (Basecamp sandbox blocks QtQuick.Dialogs FileDialog) ─
     Dialog {
         id: attachPathDialog
         title: "Attach Image"
