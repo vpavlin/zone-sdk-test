@@ -13,7 +13,7 @@ Rectangle {
         id: theme
         readonly property color bg:          "#171717"
         readonly property color bgSecondary: "#262626"
-        readonly property color bgElevated:  "#0E121B"
+        readonly property color bgElevated:  "#1E1E1E"
         readonly property color bgInset:     "#141414"
         readonly property color surface:     "#343434"
         readonly property color border:      "#434343"
@@ -29,7 +29,7 @@ Rectangle {
         readonly property color success:     "#49F563"
         readonly property color error:       "#FB3748"
         readonly property color warning:     "#FEBC2E"
-        readonly property color info:        "#4A90E2"
+        readonly property color info:        "#ED7B58"
         readonly property color notify:      "#FB3748"
 
         readonly property int fontPrimary:   14
@@ -37,6 +37,9 @@ Rectangle {
     }
 
     property bool showSetup: backend.ownChannelId === ""
+
+    palette.highlight: theme.accent
+    palette.highlightedText: theme.text
 
     // ── Main Layout ──────────────────────────────────────────────────────────
     ColumnLayout {
@@ -178,8 +181,8 @@ Rectangle {
                                     // Backfill button
                                     Rectangle {
                                         visible: chDelegate.backfilling || chDelegate.selected
-                                        width: 20; height: 20; radius: 10
-                                        color: chDelegate.backfilling ? theme.info : "transparent"
+                                        width: 20; height: 20; radius: 10; z: 1
+                                        color: chDelegate.backfilling ? theme.accent : "transparent"
                                         border.color: chDelegate.backfilling ? "transparent" : theme.border
                                         border.width: 1
                                         Text {
@@ -190,9 +193,12 @@ Rectangle {
                                         }
                                         MouseArea {
                                             anchors.fill: parent
-                                            onClicked: chDelegate.backfilling
-                                                ? backend.stopBackfill(modelData)
-                                                : backend.startBackfill(modelData)
+                                            onClicked: {
+                                                if (chDelegate.backfilling)
+                                                    backend.stopBackfill(modelData)
+                                                else
+                                                    backend.startBackfill(modelData)
+                                            }
                                         }
                                     }
 

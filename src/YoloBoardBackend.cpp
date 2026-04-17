@@ -1155,7 +1155,6 @@ QVariantMap YoloBoardBackend::backfillProgress() const {
 // ── History backfill ──────────────────────────────────────────────────────────
 
 void YoloBoardBackend::startBackfill(const QString& channelId) {
-    if (!isStandalone()) return;  // only supported in standalone mode for now
     if (m_backfillCancelled.contains(channelId)) return;  // already running
 
     auto cancelled = std::make_shared<std::atomic<bool>>(false);
