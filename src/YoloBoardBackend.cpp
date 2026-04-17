@@ -546,11 +546,15 @@ void YoloBoardBackend::attachFile(const QString& filePath) {
 }
 
 void YoloBoardBackend::openFilePicker() {
-    QString path = QFileDialog::getOpenFileName(
-        nullptr, "Attach Image", QDir::homePath(),
+    auto* dialog = new QFileDialog(nullptr, "Attach Image", QDir::homePath(),
         "Image files (*.png *.jpg *.jpeg *.gif *.webp);;All files (*)");
-    if (!path.isEmpty())
-        attachFile(path);
+    dialog->setFileMode(QFileDialog::ExistingFile);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &QFileDialog::fileSelected, this, [this](const QString& path) {
+        if (!path.isEmpty())
+            attachFile(path);
+    });
+    dialog->open();
 }
 
 void YoloBoardBackend::clearAttachment() {
