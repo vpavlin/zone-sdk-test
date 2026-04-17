@@ -42,7 +42,7 @@ target_sources(${PLUGIN_TARGET} PRIVATE
 )
 
 qt_add_resources(${PLUGIN_TARGET} "yolo_board_qml"
-    PREFIX "/"
+    PREFIX "/qml"
     BASE "src/qml"
     FILES ${QML_SOURCES}
 )

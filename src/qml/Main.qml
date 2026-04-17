@@ -2,14 +2,10 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-ApplicationWindow {
+Rectangle {
     id: root
-    visible: true
     width: 900
     height: 600
-    minimumWidth: 600
-    minimumHeight: 400
-    title: "Yolo Board"
     color: "#1a1a2e"
 
     // ── Colours ───────────────────────────────────────────────────────────────
