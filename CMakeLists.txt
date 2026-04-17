@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
 # ── Qt ──────────────────────────────────────────────────────────────────────
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Quick QuickWidgets Qml Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Quick QuickWidgets Qml Concurrent Network)
 
 # ── OpenSSL (for Ed25519 channel ID derivation in standalone mode) ───────────
 find_package(OpenSSL REQUIRED)
@@ -67,6 +67,7 @@ target_link_libraries(${PLUGIN_TARGET} PRIVATE
     Qt6::QuickWidgets
     Qt6::Qml
     Qt6::Concurrent
+    Qt6::Network
     ${LOGOS_CPP_SDK_ROOT}/lib/liblogos_sdk.a
     zone_sequencer_rs
 )
@@ -110,6 +111,7 @@ target_link_libraries(${APP_TARGET} PRIVATE
     Qt6::Quick
     Qt6::Qml
     Qt6::Concurrent
+    Qt6::Network
     zone_sequencer_rs
     OpenSSL::Crypto
 )

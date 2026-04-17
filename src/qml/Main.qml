@@ -394,7 +394,7 @@ Rectangle {
 
                                 Text {
                                     width: parent.width
-                                    text: modelData.data || ""
+                                    text: modelData.displayText || modelData.data || ""
                                     color: isFailed  ? theme.error
                                          : isPending ? theme.textMuted
                                          :             theme.text
@@ -402,6 +402,48 @@ Rectangle {
                                     font.strikeout: isFailed
                                     wrapMode: Text.Wrap
                                     opacity: isPending ? 0.5 : 1.0
+                                    visible: (modelData.displayText || modelData.data || "").length > 0
+                                }
+
+                                Repeater {
+                                    model: modelData.media || []
+                                    delegate: Item {
+                                        width: parent.width
+                                        height: mediaImg.status === Image.Ready
+                                                ? mediaImg.paintedHeight + 8
+                                                : (mediaPlaceholder.visible ? 40 : 0)
+
+                                        Image {
+                                            id: mediaImg
+                                            width: Math.min(parent.width, 300)
+                                            fillMode: Image.PreserveAspectFit
+                                            source: {
+                                                var p = backend.resolveMediaPath(modelData.cid)
+                                                return p.length > 0 ? "file://" + p : ""
+                                            }
+                                            visible: source.toString().length > 0
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: Qt.openUrlExternally(mediaImg.source)
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            id: mediaPlaceholder
+                                            visible: mediaImg.source.toString().length === 0
+                                            width: 200; height: 32; radius: 4
+                                            color: theme.surface
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: "Loading image…"
+                                                color: theme.textMuted
+                                                font.pixelSize: 11
+                                            }
+                                            Component.onCompleted: backend.fetchMedia(modelData.cid)
+                                        }
+                                    }
                                 }
 
                                 Text {
@@ -416,6 +458,61 @@ Rectangle {
 
                     ScrollBar.vertical: ScrollBar {
                         policy: ScrollBar.AsNeeded
+                    }
+                }
+
+                // Attachment preview
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: (backend.pendingAttachmentPreview || "").length > 0 ? 52 : 0
+                    visible: (backend.pendingAttachmentPreview || "").length > 0
+                    color: theme.bgSecondary
+                    Behavior on height { NumberAnimation { duration: 120 } }
+
+                    Rectangle {
+                        anchors.top: parent.top
+                        width: parent.width; height: 1
+                        color: theme.borderSub
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 14
+                        anchors.topMargin: 6
+                        anchors.bottomMargin: 6
+                        spacing: 8
+
+                        Rectangle {
+                            width: 36; height: 36; radius: 4
+                            color: theme.surface
+                            Text {
+                                anchors.centerIn: parent
+                                text: "\uD83D\uDDBC"
+                                font.pixelSize: 18
+                            }
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: backend.pendingAttachmentPreview || ""
+                            color: theme.textSec
+                            font.pixelSize: theme.fontSecondary
+                            elide: Text.ElideMiddle
+                        }
+                        Button {
+                            contentItem: Text {
+                                text: "\u2715"
+                                color: theme.textMuted
+                                font.pixelSize: 14
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            background: Rectangle {
+                                color: parent.down ? theme.error : theme.surface
+                                radius: 4
+                                implicitWidth: 28; implicitHeight: 28
+                            }
+                            onClicked: backend.clearAttachment()
+                        }
                     }
                 }
 
@@ -439,6 +536,23 @@ Rectangle {
                         anchors.bottomMargin: 8
                         spacing: 10
 
+                        Button {
+                            contentItem: Text {
+                                text: "+"
+                                color: theme.textMuted
+                                font.pixelSize: 18
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            background: Rectangle {
+                                color: parent.down ? theme.surface : "transparent"
+                                radius: 6
+                                implicitWidth: 36; implicitHeight: 36
+                            }
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Attach image"
+                            onClicked: backend.openFilePicker()
+                        }
+
                         TextField {
                             id: composeInput
                             Layout.fillWidth: true
@@ -457,9 +571,11 @@ Rectangle {
                         }
 
                         Button {
-                            text: "Publish"
+                            text: backend.uploading ? "Uploading…" : "Publish"
                             font.pixelSize: theme.fontPrimary
-                            enabled: backend.connected && composeInput.text.length > 0
+                            enabled: backend.connected && !backend.uploading
+                                     && (composeInput.text.length > 0
+                                         || (backend.pendingAttachmentPreview || "").length > 0)
                             contentItem: Text {
                                 text: parent.text
                                 color: parent.enabled ? theme.text : theme.textMuted
@@ -532,7 +648,7 @@ Rectangle {
 
         Rectangle {
             anchors.centerIn: parent
-            width: 420; height: 280
+            width: 420; height: 340
             color: theme.bgSecondary
             border.color: theme.border
             border.width: 1
@@ -586,6 +702,21 @@ Rectangle {
                         radius: 6
                     }
                 }
+                TextField {
+                    id: storageInput
+                    Layout.fillWidth: true
+                    placeholderText: "Storage URL (e.g. http://localhost:8090)"
+                    placeholderTextColor: theme.textPlace
+                    font.pixelSize: theme.fontPrimary
+                    color: theme.text
+                    text: backend.storageUrl
+                    background: Rectangle {
+                        color: theme.bgInset
+                        border.color: storageInput.activeFocus ? theme.accent : theme.border
+                        border.width: 1
+                        radius: 6
+                    }
+                }
                 Button {
                     Layout.fillWidth: true
                     text: "Connect"
@@ -608,6 +739,8 @@ Rectangle {
                     onClicked: {
                         backend.setDataDir(dataDirInput.text)
                         backend.setNodeUrl(nodeInput.text)
+                        if (storageInput.text.length > 0)
+                            backend.setStorageUrl(storageInput.text)
                         backend.connectToNode()
                     }
                 }
@@ -626,16 +759,20 @@ Rectangle {
 
     function doPublish() {
         var msg = composeInput.text.trim()
-        if (msg.length > 0) {
+        var hasAttachment = (backend.pendingAttachmentPreview || "").length > 0
+        if (msg.length === 0 && !hasAttachment) return
+        if (hasAttachment) {
+            backend.publishWithAttachment(msg)
+        } else {
             backend.publish(msg)
-            composeInput.text = ""
         }
+        composeInput.text = ""
     }
 
     Connections {
         target: backend
         function onMessagesChanged() {
-            messageList.positionViewAtBeginning()
+            messageList.positionViewAtEnd()
         }
     }
 }

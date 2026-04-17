@@ -25,3 +25,5 @@ cache/
 channel.id
 target/
 sequencer.checkpoint*
+media_cache/
+storage/

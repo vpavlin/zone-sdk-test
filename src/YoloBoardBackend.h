@@ -13,10 +13,13 @@
 #include <QDir>
 #include <QUuid>
 #include <QDateTime>
+#include <QUrl>
 #include <QRegularExpression>
 #include <QFutureWatcher>
 #include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <atomic>
 #include <memory>
 
@@ -60,6 +63,9 @@ class YoloBoardBackend : public QObject {
     Q_PROPERTY(QString nodeUrl READ nodeUrl WRITE setNodeUrl NOTIFY nodeUrlChanged)
     Q_PROPERTY(QVariantMap backfillProgress READ backfillProgress NOTIFY backfillProgressChanged)
     Q_PROPERTY(QString dataDir READ dataDir NOTIFY dataDirChanged)
+    Q_PROPERTY(QString storageUrl READ storageUrl WRITE setStorageUrl NOTIFY storageUrlChanged)
+    Q_PROPERTY(QString pendingAttachmentPreview READ pendingAttachmentPreview NOTIFY pendingAttachmentChanged)
+    Q_PROPERTY(bool uploading READ uploading NOTIFY uploadingChanged)
 
 public:
     explicit YoloBoardBackend(LogosAPI* logosAPI, QObject* parent = nullptr);
@@ -75,6 +81,9 @@ public:
     QString nodeUrl() const { return m_nodeUrl; }
     QVariantMap backfillProgress() const;
     QString dataDir() const { return m_dataDir; }
+    QString storageUrl() const { return m_storageUrl; }
+    QString pendingAttachmentPreview() const;
+    bool uploading() const { return m_uploading; }
 
     Q_INVOKABLE void subscribe(const QString& channelIdOrName);
     Q_INVOKABLE void unsubscribe(const QString& channelId);
@@ -89,6 +98,13 @@ public:
     Q_INVOKABLE void resetCheckpoint();
     Q_INVOKABLE void startBackfill(const QString& channelId);
     Q_INVOKABLE void stopBackfill(const QString& channelId);
+    Q_INVOKABLE void setStorageUrl(const QString& url);
+    Q_INVOKABLE void attachFile(const QString& filePath);
+    Q_INVOKABLE void openFilePicker();
+    Q_INVOKABLE void clearAttachment();
+    Q_INVOKABLE void publishWithAttachment(const QString& text);
+    Q_INVOKABLE QString resolveMediaPath(const QString& cid);
+    Q_INVOKABLE void fetchMedia(const QString& cid);
 
     // Named-channel helpers — callable from QML for display
     Q_INVOKABLE QString channelDisplayName(const QString& channelId) const;
@@ -105,6 +121,10 @@ signals:
     void publishResult(bool success, const QString& txHash);
     void backfillProgressChanged();
     void dataDirChanged();
+    void storageUrlChanged();
+    void pendingAttachmentChanged();
+    void uploadingChanged();
+    void mediaReady(const QString& cid, const QString& localPath);
 
 private slots:
     void pollMessages();
@@ -113,6 +133,11 @@ private:
     bool isStandalone() const;
 
     QVariant invokeZone(const QString& method, const QVariantList& args = {});
+    QVariant invokeStorage(const QString& method, const QVariantList& args = {});
+    void initStorageModule();
+    void finishPublishWithMedia(const QString& text, const QString& cid,
+                                const QString& mimeType, const QString& fileName,
+                                int fileSize, const QByteArray& fileData);
 
     void fetchMessagesAsync(const QString& channelId);
     void mergeMessages(const QString& channelId, const QString& json);
@@ -132,6 +157,11 @@ private:
     static QString encodeChannelName(const QString& name);   // "alice" -> 64-char hex
     static QString decodeChannelName(const QString& hexId);  // hex -> "alice" or ""
 
+    // Media helpers
+    QString mediaCacheDir() const;
+    QString mediaCachePath(const QString& cid) const;
+    static QVariantMap parseMessagePayload(const QString& data);
+
     // Disk cache
     QString cacheFilePath(const QString& channelId) const;
     void saveCacheForChannel(const QString& channelId);
@@ -149,6 +179,8 @@ private:
 
     LogosAPI*         m_logosAPI = nullptr;
     LogosAPIClient*   m_zoneClient = nullptr;
+    LogosAPIClient*   m_storageClient = nullptr;
+    bool              m_storageStarted = false;
     void*             m_sequencerHandle = nullptr;  // persistent Rust sequencer
 
     QString     m_nodeUrl   = QStringLiteral("http://localhost:8080");
@@ -166,6 +198,7 @@ private:
 
     QList<QFutureWatcher<QString>*> m_publishWatchers;
     QSet<QString> m_fetchingChannels;   // channels with an in-flight poll
+    QSet<QString> m_fetchingMedia;     // CIDs with an in-flight download
 
     // Backfill state: channelId → cancel flag
     QMap<QString, std::shared_ptr<std::atomic<bool>>> m_backfillCancelled;
@@ -177,6 +210,11 @@ private:
     std::shared_ptr<std::atomic<bool>> m_alive =
         std::make_shared<std::atomic<bool>>(true);
 
+    QNetworkAccessManager* m_nam = nullptr;
+    QString     m_storageUrl;
+    QString     m_pendingAttachment;
+    bool        m_uploading = false;
+
     QTimer* m_pollTimer = nullptr;
     static constexpr int kPollIntervalMs   = 3000;
     static constexpr int kQueryLimit       = 50;
@@ -184,4 +222,5 @@ private:
 
     static const char* kZoneModuleName;
     static const char* kZoneObjectName;
+    static const char* kStorageModuleName;
 };

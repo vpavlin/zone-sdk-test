@@ -4,7 +4,7 @@
   "description": "Censorship-resistant bulletin board on the Logos blockchain",
   "type": "ui",
   "main": "yolo_board_plugin",
-  "dependencies": ["liblogos_zone_sequencer_module"],
+  "dependencies": ["liblogos_zone_sequencer_module", "storage_module"],
   "icon": "",
   "category": "social"
 }

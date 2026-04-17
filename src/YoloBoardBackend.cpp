@@ -9,6 +9,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFileInfo>
+#include <QFileDialog>
+#include <QThread>
+#include <QCoreApplication>
 
 // Derive Ed25519 channel ID from signing key using OpenSSL EVP.
 #include <openssl/evp.h>
@@ -30,6 +33,7 @@ static QString deriveChannelId(const QString& signingKeyHex) {
 
 const char* YoloBoardBackend::kZoneModuleName = "liblogos_zone_sequencer_module";
 const char* YoloBoardBackend::kZoneObjectName = "liblogos_zone_sequencer_module";
+const char* YoloBoardBackend::kStorageModuleName = "storage_module";
 
 // ── Named-channel helpers ─────────────────────────────────────────────────────
 
@@ -65,6 +69,54 @@ QString YoloBoardBackend::channelDisplayName(const QString& channelId) const {
     return channelId;
 }
 
+// ── Media helpers ────────────────────────────────────────────────────────────
+
+QString YoloBoardBackend::mediaCacheDir() const {
+    if (m_dataDir.isEmpty()) return {};
+    return m_dataDir + "/media_cache";
+}
+
+QString YoloBoardBackend::mediaCachePath(const QString& cid) const {
+    QString dir = mediaCacheDir();
+    if (dir.isEmpty()) return {};
+    return dir + "/" + cid;
+}
+
+QVariantMap YoloBoardBackend::parseMessagePayload(const QString& data) {
+    QString trimmed = data.trimmed();
+    if (!trimmed.startsWith('{')) {
+        return {{"text", data}, {"media", QVariantList{}}};
+    }
+    QJsonDocument doc = QJsonDocument::fromJson(data.toUtf8());
+    if (!doc.isObject()) {
+        return {{"text", data}, {"media", QVariantList{}}};
+    }
+    QJsonObject obj = doc.object();
+    if (!obj.contains("v")) {
+        return {{"text", data}, {"media", QVariantList{}}};
+    }
+
+    QVariantMap result;
+    result["text"] = obj["text"].toString();
+    QVariantList media;
+    for (const QJsonValue& m : obj["media"].toArray()) {
+        QJsonObject mo = m.toObject();
+        QVariantMap entry;
+        entry["cid"]  = mo["cid"].toString();
+        entry["type"] = mo["type"].toString();
+        entry["name"] = mo["name"].toString();
+        entry["size"] = mo["size"].toInt();
+        media.append(entry);
+    }
+    result["media"] = media;
+    return result;
+}
+
+QString YoloBoardBackend::pendingAttachmentPreview() const {
+    if (m_pendingAttachment.isEmpty()) return {};
+    return QFileInfo(m_pendingAttachment).fileName();
+}
+
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
 QString YoloBoardBackend::cacheFilePath(const QString& channelId) const {
@@ -98,6 +150,9 @@ void YoloBoardBackend::loadCacheForChannel(const QString& channelId) {
         msg["timestamp"] = obj["timestamp"].toString();
         msg["pending"]   = false;
         msg["failed"]    = false;
+        QVariantMap parsed = parseMessagePayload(msg["data"].toString());
+        msg["displayText"] = parsed["text"];
+        msg["media"]       = parsed["media"];
         loaded.append(msg);
         seenIds.insert(id);
     }
@@ -209,12 +264,9 @@ YoloBoardBackend::YoloBoardBackend(LogosAPI* logosAPI, QObject* parent)
     m_pollTimer->setInterval(kPollIntervalMs);
     connect(m_pollTimer, &QTimer::timeout, this, &YoloBoardBackend::pollMessages);
 
-    // Use direct Rust FFI in all modes. The LogosAPI module path is blocked by
-    // a framework bug (capability_module's informModuleToken reports "LogosAPI
-    // not available", preventing token auth for inter-module calls).
-    // The Rust FFI lib (libzone_sequencer_rs.so) is bundled with the plugin,
-    // so direct FFI works identically in both standalone and Basecamp.
-    Q_UNUSED(m_logosAPI);
+    // m_zoneClient is initialized lazily in initZoneSequencer() to avoid
+    // blocking the constructor while the module is still starting up.
+    m_nam = new QNetworkAccessManager(this);
     setStatus("Waiting for configuration...");
 
     loadSettings();
@@ -272,6 +324,7 @@ void YoloBoardBackend::loadSettings() {
             s.remove("dataDir");   // clear the stale entry
         }
     }
+    m_storageUrl = s.value("storageUrl").toString();
     // Try to initialise from file-based config
     initZoneSequencer();
 }
@@ -280,6 +333,7 @@ void YoloBoardBackend::saveSettings() {
     QSettings s;
     s.setValue("nodeUrl", m_nodeUrl);
     if (!m_dataDir.isEmpty()) s.setValue("dataDir", m_dataDir);
+    if (!m_storageUrl.isEmpty()) s.setValue("storageUrl", m_storageUrl);
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -303,11 +357,51 @@ QVariant YoloBoardBackend::invokeZone(const QString& method, const QVariantList&
 #endif
 }
 
+QVariant YoloBoardBackend::invokeStorage(const QString& method, const QVariantList& args) {
+#ifdef LOGOS_CORE_AVAILABLE
+    if (!m_storageClient) {
+        qWarning() << "YoloBoardBackend: no storage client, cannot call" << method;
+        return {};
+    }
+    return m_storageClient->invokeRemoteMethod(kStorageModuleName, method, args);
+#else
+    Q_UNUSED(method); Q_UNUSED(args);
+    return {};
+#endif
+}
+
+void YoloBoardBackend::initStorageModule() {
+#ifdef LOGOS_CORE_AVAILABLE
+    if (m_storageStarted || !m_logosAPI) return;
+    if (!m_storageClient) {
+        m_storageClient = m_logosAPI->getClient(kStorageModuleName);
+        if (!m_storageClient) return;
+    }
+    // Init with data dir config
+    QString dataDir = m_dataDir.isEmpty() ? "/tmp/logos-storage" : m_dataDir + "/storage";
+    QDir().mkpath(dataDir);
+    QString cfg = QString("{\"data-dir\":\"%1\"}").arg(dataDir);
+    QVariant initResult = invokeStorage("init", {cfg});
+    qInfo() << "Storage init:" << initResult;
+    QVariant startResult = invokeStorage("start", {});
+    qInfo() << "Storage start:" << startResult;
+    m_storageStarted = true;
+#endif
+}
+
 bool YoloBoardBackend::isStandalone() const {
     return m_zoneClient == nullptr;
 }
 
 void YoloBoardBackend::initZoneSequencer() {
+#ifdef LOGOS_CORE_AVAILABLE
+    if (!m_zoneClient && m_logosAPI) {
+        m_zoneClient = m_logosAPI->getClient(kZoneModuleName);
+        if (m_zoneClient)
+            qInfo() << "YoloBoardBackend: zone client connected via LogosAPI";
+    }
+#endif
+
     // Try loading key from file first; fall back to m_signingKey already set
     bool keyFromFile = loadKeyFromFile();
     if (!keyFromFile && m_signingKey.isEmpty()) {
@@ -322,41 +416,31 @@ void YoloBoardBackend::initZoneSequencer() {
         if (isStandalone()) {
             m_ownChannelId = deriveChannelId(m_signingKey);
         } else {
-            // Run IPC calls in background to avoid freezing the UI
+            // IPC calls must run on main thread (QRemoteObjects is thread-bound).
+            // Use a single-shot timer to defer so we don't block the current call.
             setStatus("Connecting to zone sequencer module...");
-            QString nodeUrl = m_nodeUrl, sigKey = m_signingKey, dataDir = m_dataDir;
-            auto alive = m_alive;
-            QtConcurrent::run([this, alive, nodeUrl, sigKey, dataDir]() {
-                invokeZone("set_node_url", {nodeUrl});
-                invokeZone("set_signing_key", {sigKey});
-                if (!dataDir.isEmpty())
-                    invokeZone("set_checkpoint_path", {dataDir + "/sequencer.checkpoint"});
+            QTimer::singleShot(0, this, [this]() {
+                invokeZone("set_node_url", {m_nodeUrl});
+                invokeZone("set_signing_key", {m_signingKey});
+                if (!m_dataDir.isEmpty())
+                    invokeZone("set_checkpoint_path", {m_dataDir + "/sequencer.checkpoint"});
                 QString chId = invokeZone("get_channel_id").toString();
                 if (!chId.isEmpty() && !chId.startsWith("Error:"))
                     invokeZone("set_channel_id", {chId});
-                QMetaObject::invokeMethod(this, [this, alive, chId]() {
-                    if (!alive->load()) return;
-                    m_ownChannelId = chId;
-                    initZoneSequencerFinish();
-                }, Qt::QueuedConnection);
+                m_ownChannelId = chId;
+                initZoneSequencerFinish();
             });
             return;
         }
     } else if (!isStandalone()) {
         setStatus("Connecting to zone sequencer module...");
-        QString nodeUrl = m_nodeUrl, sigKey = m_signingKey, dataDir = m_dataDir;
-        QString channelId = m_ownChannelId;
-        auto alive = m_alive;
-        QtConcurrent::run([this, alive, nodeUrl, sigKey, dataDir, channelId]() {
-            invokeZone("set_node_url", {nodeUrl});
-            invokeZone("set_signing_key", {sigKey});
-            if (!dataDir.isEmpty())
-                invokeZone("set_checkpoint_path", {dataDir + "/sequencer.checkpoint"});
-            invokeZone("set_channel_id", {channelId});
-            QMetaObject::invokeMethod(this, [this, alive]() {
-                if (!alive->load()) return;
-                initZoneSequencerFinish();
-            }, Qt::QueuedConnection);
+        QTimer::singleShot(0, this, [this]() {
+            invokeZone("set_node_url", {m_nodeUrl});
+            invokeZone("set_signing_key", {m_signingKey});
+            if (!m_dataDir.isEmpty())
+                invokeZone("set_checkpoint_path", {m_dataDir + "/sequencer.checkpoint"});
+            invokeZone("set_channel_id", {m_ownChannelId});
+            initZoneSequencerFinish();
         });
         return;
     }
@@ -399,6 +483,10 @@ void YoloBoardBackend::initZoneSequencerFinish() {
     setStatus(QString(isStandalone() ? "[standalone] " : "") + "Connected to " + m_nodeUrl);
     m_pollTimer->start();
     loadSubscriptionsJson();
+
+    // Initialize storage module if available (Basecamp mode)
+    if (!isStandalone())
+        QTimer::singleShot(500, this, [this]() { initStorageModule(); });
 }
 
 // ── Q_INVOKABLEs ─────────────────────────────────────────────────────────────
@@ -439,6 +527,302 @@ void YoloBoardBackend::resetCheckpoint() {
         setStatus("No checkpoint to reset");
     }
 }
+
+// ── Media / storage ──────────────────────────────────────────────────────────
+
+void YoloBoardBackend::setStorageUrl(const QString& url) {
+    if (m_storageUrl == url) return;
+    m_storageUrl = url;
+    emit storageUrlChanged();
+    saveSettings();
+}
+
+void YoloBoardBackend::attachFile(const QString& filePath) {
+    QString path = filePath;
+    if (path.startsWith("file://"))
+        path = QUrl(path).toLocalFile();
+    m_pendingAttachment = path;
+    emit pendingAttachmentChanged();
+}
+
+void YoloBoardBackend::openFilePicker() {
+    QString path = QFileDialog::getOpenFileName(
+        nullptr, "Attach Image", QDir::homePath(),
+        "Image files (*.png *.jpg *.jpeg *.gif *.webp);;All files (*)");
+    if (!path.isEmpty())
+        attachFile(path);
+}
+
+void YoloBoardBackend::clearAttachment() {
+    m_pendingAttachment.clear();
+    emit pendingAttachmentChanged();
+}
+
+void YoloBoardBackend::publishWithAttachment(const QString& text) {
+    if (m_pendingAttachment.isEmpty()) {
+        publish(text);
+        return;
+    }
+
+    QFileInfo fi(m_pendingAttachment);
+    if (!fi.exists()) {
+        setStatus("Cannot read file: " + m_pendingAttachment);
+        return;
+    }
+    QString filePath = fi.absoluteFilePath();
+    QString fileName = fi.fileName();
+    QString ext = fi.suffix().toLower();
+    QString mimeType = "application/octet-stream";
+    if (ext == "png")                       mimeType = "image/png";
+    else if (ext == "jpg" || ext == "jpeg") mimeType = "image/jpeg";
+    else if (ext == "gif")                  mimeType = "image/gif";
+    else if (ext == "webp")                 mimeType = "image/webp";
+    int fileSize = fi.size();
+
+    m_uploading = true;
+    emit uploadingChanged();
+    setStatus("Uploading " + fileName + "…");
+
+    QString cid;
+
+#ifdef LOGOS_CORE_AVAILABLE
+    if (m_storageClient && m_storageStarted) {
+        // Synchronous upload: init → chunks → finalize
+        QFile f(filePath);
+        if (!f.open(QIODevice::ReadOnly)) {
+            m_uploading = false;
+            emit uploadingChanged();
+            setStatus("Cannot read file");
+            return;
+        }
+        QByteArray allData = f.readAll();
+        f.close();
+
+        // Use uploadUrl — it handles init+chunks+finalize internally.
+        // Returns session ID immediately; CID comes via storageUploadDone event.
+        // We defer getting the CID: start upload, then use a timer to check manifests.
+        QJsonObject uploadObj;
+        {
+            QString resultStr = invokeStorage("uploadUrl", {filePath, (qlonglong)65536}).toString();
+            if (!resultStr.isEmpty())
+                uploadObj = QJsonDocument::fromJson(resultStr.toUtf8()).object();
+        }
+        qInfo() << "Storage uploadUrl:" << uploadObj;
+
+        if (uploadObj["success"].toBool()) {
+            // Upload started async — defer CID lookup via timer
+            auto* timer = new QTimer(this);
+            int* attempts = new int(0);
+            timer->setInterval(2000);
+            connect(timer, &QTimer::timeout, this, [this, timer, attempts, text, mimeType, fileName, fileSize, allData]() {
+                (*attempts)++;
+                QString manifestsStr = invokeStorage("manifests", {}).toString();
+                QJsonObject mObj;
+                if (!manifestsStr.isEmpty())
+                    mObj = QJsonDocument::fromJson(manifestsStr.toUtf8()).object();
+
+                QString foundCid;
+                if (mObj["success"].toBool()) {
+                    QJsonArray arr = mObj["value"].toArray();
+                    for (const QJsonValue& v : arr) {
+                        QJsonObject m = v.toObject();
+                        if (m["filename"].toString() == fileName) {
+                            foundCid = m["cid"].toString();
+                            break;
+                        }
+                    }
+                }
+
+                if (!foundCid.isEmpty()) {
+                    timer->stop(); timer->deleteLater(); delete attempts;
+                    m_uploading = false;
+                    emit uploadingChanged();
+                    finishPublishWithMedia(text, foundCid, mimeType, fileName, fileSize, allData);
+                } else if (*attempts >= 30) {
+                    timer->stop(); timer->deleteLater(); delete attempts;
+                    m_uploading = false;
+                    emit uploadingChanged();
+                    setStatus("Upload timed out waiting for CID");
+                }
+            });
+            timer->start();
+            return;  // async — don't fall through
+        }
+    }
+#endif
+
+    if (cid.isEmpty() && !m_storageUrl.isEmpty()) {
+        // HTTP fallback
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly)) {
+            m_uploading = false;
+            emit uploadingChanged();
+            setStatus("Cannot read file");
+            return;
+        }
+        QByteArray fileData = file.readAll();
+        file.close();
+
+        QUrl url(m_storageUrl.trimmed().remove(QRegularExpression("/+$")) + "/api/storage/v1/data");
+        QNetworkRequest req(url);
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
+        req.setRawHeader("Content-Disposition",
+                         ("attachment; filename=\"" + fileName + "\"").toUtf8());
+
+        QNetworkReply* reply = m_nam->post(req, fileData);
+        connect(reply, &QNetworkReply::finished, this,
+                [this, reply, text, fileName, mimeType, fileSize, fileData]() {
+            reply->deleteLater();
+            m_uploading = false;
+            emit uploadingChanged();
+
+            if (reply->error() != QNetworkReply::NoError) {
+                setStatus("Upload failed: " + reply->errorString());
+                return;
+            }
+
+            QByteArray body = reply->readAll();
+            QString httpCid;
+            QJsonDocument doc = QJsonDocument::fromJson(body);
+            if (doc.isObject() && doc.object().contains("cid"))
+                httpCid = doc.object()["cid"].toString();
+            else
+                httpCid = QString::fromUtf8(body).trimmed().remove('"');
+
+            if (httpCid.isEmpty()) {
+                setStatus("Upload returned empty CID");
+                return;
+            }
+            finishPublishWithMedia(text, httpCid, mimeType, fileName, fileSize, fileData);
+        });
+        return;
+    }
+
+    m_uploading = false;
+    emit uploadingChanged();
+
+    if (cid.isEmpty()) {
+        setStatus("Upload failed — no storage available");
+        return;
+    }
+
+    // Cache locally
+    QFile file(filePath);
+    QByteArray fileData;
+    if (file.open(QIODevice::ReadOnly)) fileData = file.readAll();
+
+    finishPublishWithMedia(text, cid, mimeType, fileName, fileSize, fileData);
+}
+
+void YoloBoardBackend::finishPublishWithMedia(const QString& text, const QString& cid,
+                                               const QString& mimeType, const QString& fileName,
+                                               int fileSize, const QByteArray& fileData) {
+    setStatus("Uploaded, CID: " + cid.left(16) + "…");
+
+    // Cache locally
+    QString cachePath = mediaCachePath(cid);
+    if (!cachePath.isEmpty() && !fileData.isEmpty()) {
+        QDir().mkpath(mediaCacheDir());
+        QFile cache(cachePath);
+        if (cache.open(QIODevice::WriteOnly))
+            cache.write(fileData);
+    }
+
+    QJsonObject payload;
+    payload["v"] = 1;
+    payload["text"] = text;
+    QJsonArray media;
+    QJsonObject mediaEntry;
+    mediaEntry["cid"]  = cid;
+    mediaEntry["type"] = mimeType;
+    mediaEntry["name"] = fileName;
+    mediaEntry["size"] = fileSize;
+    media.append(mediaEntry);
+    payload["media"] = media;
+
+    QString encoded = QString::fromUtf8(
+        QJsonDocument(payload).toJson(QJsonDocument::Compact));
+
+    clearAttachment();
+    publish(encoded);
+}
+
+QString YoloBoardBackend::resolveMediaPath(const QString& cid) {
+    QString path = mediaCachePath(cid);
+    if (path.isEmpty()) return {};
+    if (QFile::exists(path)) return path;
+    return {};
+}
+
+void YoloBoardBackend::fetchMedia(const QString& cid) {
+    if (cid.isEmpty()) return;
+
+    QString cached = resolveMediaPath(cid);
+    if (!cached.isEmpty()) {
+        emit mediaReady(cid, cached);
+        return;
+    }
+    if (m_fetchingMedia.contains(cid)) return;
+    m_fetchingMedia.insert(cid);
+
+    QString cachePath = mediaCachePath(cid);
+
+#ifdef LOGOS_CORE_AVAILABLE
+    if (m_storageClient && m_storageStarted && !cachePath.isEmpty()) {
+        QDir().mkpath(mediaCacheDir());
+        QVariant result = invokeStorage("downloadToUrl", {cid, cachePath, false, (qlonglong)0});
+        qInfo() << "Storage downloadToUrl result:" << result;
+        m_fetchingMedia.remove(cid);
+        if (QFile::exists(cachePath)) {
+            emit mediaReady(cid, cachePath);
+            emit messagesChanged();
+        }
+        return;
+    }
+#endif
+
+    if (m_storageUrl.isEmpty()) {
+        QUrl nodeUrl(m_nodeUrl);
+        if (nodeUrl.isValid() && !nodeUrl.host().isEmpty()) {
+            m_storageUrl = nodeUrl.scheme() + "://" + nodeUrl.host() + ":8090";
+            emit storageUrlChanged();
+        } else {
+            m_fetchingMedia.remove(cid);
+            return;
+        }
+    }
+
+    QUrl url(m_storageUrl.trimmed().remove(QRegularExpression("/+$"))
+             + "/api/storage/v1/data/" + cid + "/network/stream");
+    QNetworkRequest req(url);
+    QNetworkReply* reply = m_nam->get(req);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, cid]() {
+        reply->deleteLater();
+        m_fetchingMedia.remove(cid);
+
+        if (reply->error() != QNetworkReply::NoError) {
+            qWarning() << "fetchMedia failed for" << cid << reply->errorString();
+            return;
+        }
+
+        QByteArray data = reply->readAll();
+        QString dir = mediaCacheDir();
+        if (dir.isEmpty()) return;
+        QDir().mkpath(dir);
+
+        QString path = mediaCachePath(cid);
+        QFile f(path);
+        if (f.open(QIODevice::WriteOnly)) {
+            f.write(data);
+            f.close();
+            emit mediaReady(cid, path);
+            emit messagesChanged();
+        }
+    });
+}
+
+// ── Subscriptions ────────────────────────────────────────────────────────────
 
 void YoloBoardBackend::subscribe(const QString& input) {
     QString channelId = input.trimmed();
@@ -528,6 +912,9 @@ void YoloBoardBackend::publish(const QString& message) {
     pendingMsg["timestamp"] = QDateTime::currentDateTime().toString("HH:mm:ss");
     pendingMsg["pending"]   = true;
     pendingMsg["failed"]    = false;
+    QVariantMap parsed = parseMessagePayload(message);
+    pendingMsg["displayText"] = parsed["text"];
+    pendingMsg["media"]       = parsed["media"];
     m_messages[m_ownChannelId].append(pendingMsg);
     if (m_ownChannelId == currentChannelId()) emit messagesChanged();
 
@@ -557,10 +944,31 @@ void YoloBoardBackend::publish(const QString& message) {
             onPublishFinished(watcher, m_ownChannelId, pendingId);
         });
     } else {
-        // LogosAPI path — invoke synchronously (zone module handles its own threading)
-        QString txHash = invokeZone("publish", {message}).toString();
-        onPublishFinished(nullptr, m_ownChannelId, pendingId);
-        Q_UNUSED(txHash);
+        // LogosAPI path — invoke on main thread (QRemoteObjects is thread-bound)
+        QString result = invokeZone("publish", {message}).toString();
+
+        // Update pending message directly
+        bool ok = !result.isEmpty() && !result.startsWith("Error:");
+        QVariantList& msgs = m_messages[m_ownChannelId];
+        for (int i = 0; i < msgs.size(); ++i) {
+            QVariantMap m = msgs[i].toMap();
+            if (m["id"].toString() == pendingId) {
+                m["pending"] = false;
+                m["failed"]  = !ok;
+                if (ok) m["id"] = result;
+                msgs[i] = m;
+                break;
+            }
+        }
+        if (m_ownChannelId == currentChannelId()) emit messagesChanged();
+        if (ok) {
+            setStatus("Published: " + result.left(12) + "…");
+            emit publishResult(true, result);
+        } else {
+            setStatus("Publish failed: " + result);
+            emit publishResult(false, result);
+        }
+        saveCacheForChannel(m_ownChannelId);
     }
 }
 
@@ -619,27 +1027,15 @@ void YoloBoardBackend::fetchMessagesAsync(const QString& channelId) {
     bool    standalone = isStandalone();
 
     auto alive = m_alive;
-    QThreadPool::globalInstance()->start([this, alive, channelId, nodeUrl, limit, standalone]() {
+    // Always use direct FFI for queries — they're stateless, fast, and avoid
+    // IPC timeouts that block the main thread.
+    QThreadPool::globalInstance()->start([this, alive, channelId, nodeUrl, limit]() {
         QString json;
-        if (standalone) {
-            char* raw = zone_query_channel(
-                nodeUrl.toUtf8().constData(),
-                channelId.toUtf8().constData(),
-                limit);
-            if (raw) { json = QString::fromUtf8(raw); zone_free_string(raw); }
-        } else {
-            // LogosAPI path: invokeZone is not thread-safe, so marshal back to main thread
-            // and do a blocking invoke there instead.  For now this path stays synchronous;
-            // it only affects plugin mode which has its own threading model.
-            if (!alive->load()) return;
-            QMetaObject::invokeMethod(this, [this, alive, channelId, limit]() {
-                if (!alive->load()) return;
-                QString j = invokeZone("query_channel", {channelId, limit}).toString();
-                mergeMessages(channelId, j);
-                m_fetchingChannels.remove(channelId);
-            }, Qt::QueuedConnection);
-            return;
-        }
+        char* raw = zone_query_channel(
+            nodeUrl.toUtf8().constData(),
+            channelId.toUtf8().constData(),
+            limit);
+        if (raw) { json = QString::fromUtf8(raw); zone_free_string(raw); }
 
         // Marshal result back to main thread for safe state mutation
         bool queryOk = !json.isEmpty();
@@ -706,6 +1102,9 @@ void YoloBoardBackend::mergeMessages(const QString& channelId, const QString& js
             msg["timestamp"] = QDateTime::currentDateTime().toString("HH:mm:ss");
             msg["pending"]   = false;
             msg["failed"]    = false;
+            QVariantMap parsed = parseMessagePayload(text);
+            msg["displayText"] = parsed["text"];
+            msg["media"]       = parsed["media"];
             existing.append(msg);
 
             if (channelId != currentChannelId())
@@ -833,9 +1232,12 @@ void YoloBoardBackend::runBackfill(const QString& channelId,
                 msg["data"]    = obj["data"].toString();
                 msg["channel"] = channelId;
                 msg["isOwn"]   = (channelId == m_ownChannelId);
-                msg["timestamp"] = QString();  // historical — no timestamp available
+                msg["timestamp"] = QString();
                 msg["pending"] = false;
                 msg["failed"]  = false;
+                QVariantMap parsed = parseMessagePayload(msg["data"].toString());
+                msg["displayText"] = parsed["text"];
+                msg["media"]       = parsed["media"];
                 newMsgs.append(msg);
             }
             if (!alive->load()) break;
