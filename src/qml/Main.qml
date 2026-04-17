@@ -156,6 +156,194 @@ Rectangle {
         }
     }
 
+    // ── Media cache ─────────────────────────────────────────────────────────
+    property var mediaPaths: ({})
+    property var fetchingMedia: ({})
+
+    function mediaCacheDir() { return dataDir + "/media_cache" }
+
+    function resolveMedia(cid) {
+        if (mediaPaths[cid]) return mediaPaths[cid]
+        return ""
+    }
+
+    function fetchMediaBc(cid) {
+        if (!basecampMode || !storageIsReady || !cid) return
+        if (fetchingMedia[cid]) return
+        if (mediaPaths[cid]) return
+
+        var fm = Object.assign({}, fetchingMedia)
+        fm[cid] = true
+        fetchingMedia = fm
+
+        var cachePath = mediaCacheDir() + "/" + cid
+        callStorage("downloadFile", [cid, cachePath, false])
+
+        pollForFile(cid, cachePath, 0)
+    }
+
+    function pollForFile(cid, path, attempt) {
+        if (attempt >= 30) {
+            var fm2 = Object.assign({}, fetchingMedia)
+            delete fm2[cid]
+            fetchingMedia = fm2
+            return
+        }
+        pollFileTimer.cid = cid
+        pollFileTimer.path = path
+        pollFileTimer.attempt = attempt
+        pollFileTimer.start()
+    }
+
+    Timer {
+        id: pollFileTimer
+        interval: 1000
+        repeat: false
+        property string cid: ""
+        property string path: ""
+        property int attempt: 0
+        onTriggered: {
+            var existsResult = callStorage("exists", [cid])
+            var found = false
+            try {
+                var obj = JSON.parse(existsResult)
+                found = obj.success === true || obj.value === true
+            } catch(e) {
+                found = existsResult === "true"
+            }
+            if (found) {
+                var mp = Object.assign({}, mediaPaths)
+                mp[cid] = path
+                mediaPaths = mp
+                var fm = Object.assign({}, fetchingMedia)
+                delete fm[cid]
+                fetchingMedia = fm
+                updateMessages()
+            } else {
+                pollForFile(cid, path, attempt + 1)
+            }
+        }
+    }
+
+    function uploadAndPublish(filePath, text) {
+        if (!basecampMode || !storageIsReady) {
+            statusText = "Storage not ready"
+            return
+        }
+
+        var fileName = filePath.split("/").pop()
+        var ext = fileName.split(".").pop().toLowerCase()
+        var mimeType = "application/octet-stream"
+        if (ext === "png") mimeType = "image/png"
+        else if (ext === "jpg" || ext === "jpeg") mimeType = "image/jpeg"
+        else if (ext === "gif") mimeType = "image/gif"
+        else if (ext === "webp") mimeType = "image/webp"
+
+        isUploading = true
+        statusText = "Uploading " + fileName + "\u2026"
+
+        var result = callStorage("uploadUrl", [filePath, 65536])
+        console.log("uploadUrl:", result)
+
+        try {
+            var obj = JSON.parse(result)
+            if (!obj.success) {
+                isUploading = false
+                statusText = "Upload failed"
+                return
+            }
+        } catch(e) {
+            isUploading = false
+            statusText = "Upload failed: " + result
+            return
+        }
+
+        pollManifestsTimer.fileName = fileName
+        pollManifestsTimer.text = text
+        pollManifestsTimer.mimeType = mimeType
+        pollManifestsTimer.attempt = 0
+        pollManifestsTimer.start()
+    }
+
+    Timer {
+        id: pollManifestsTimer
+        interval: 2000
+        repeat: true
+        property string fileName: ""
+        property string text: ""
+        property string mimeType: ""
+        property int attempt: 0
+        onTriggered: {
+            attempt++
+            var result = callStorage("manifests", [])
+            var foundCid = ""
+            try {
+                var obj = JSON.parse(result)
+                if (obj.success) {
+                    var arr = obj.value || []
+                    for (var i = 0; i < arr.length; i++) {
+                        if (arr[i].filename === fileName) {
+                            foundCid = arr[i].cid
+                            break
+                        }
+                    }
+                }
+            } catch(e) {}
+
+            if (foundCid) {
+                stop()
+                isUploading = false
+                statusText = "Uploaded, CID: " + foundCid.substr(0, 16) + "\u2026"
+
+                var payload = JSON.stringify({
+                    v: 1,
+                    text: text,
+                    media: [{ cid: foundCid, type: mimeType, name: fileName, size: 0 }]
+                })
+                pendingAttachment = ""
+                doPublishRaw(payload)
+            } else if (attempt >= 30) {
+                stop()
+                isUploading = false
+                statusText = "Upload timed out"
+            }
+        }
+    }
+
+    function doPublishRaw(msg) {
+        var pendingId = "pending-" + Date.now()
+        var parsed = parseMessagePayload(msg)
+        var existing = (allMessages[ownChannelId] || []).slice()
+        existing.push({
+            id: pendingId, data: msg, displayText: parsed.text, media: parsed.media,
+            channel: ownChannelId, isOwn: true,
+            timestamp: new Date().toLocaleTimeString(Qt.locale(), "HH:mm:ss"),
+            pending: true, failed: false
+        })
+        var am = Object.assign({}, allMessages)
+        am[ownChannelId] = existing
+        allMessages = am
+        updateMessages()
+
+        statusText = "Publishing\u2026"
+        var result = callZone("publish", [msg])
+        var ok = result && result.length > 0 && result.indexOf("Error") !== 0
+
+        var msgs = (allMessages[ownChannelId] || []).slice()
+        for (var i = 0; i < msgs.length; i++) {
+            if (msgs[i].id === pendingId) {
+                msgs[i] = Object.assign({}, msgs[i], { pending: false, failed: !ok })
+                if (ok) msgs[i].id = result
+                break
+            }
+        }
+        am = Object.assign({}, allMessages)
+        am[ownChannelId] = msgs
+        allMessages = am
+        updateMessages()
+        statusText = ok ? "Published: " + result.substr(0, 12) + "\u2026" : "Publish failed: " + result
+    }
+
     function encodeChannelName(name) {
         var prefix = "logos:yolo:"
         var raw = prefix + name
@@ -510,6 +698,11 @@ Rectangle {
                 if (hasAttach) api.publishWithAttachment(msg)
                 else api.publish(msg)
             }
+            return
+        }
+
+        if (hasAttach) {
+            uploadAndPublish(pendingAttachment, msg)
             return
         }
 
@@ -941,11 +1134,13 @@ Rectangle {
                                             width: Math.min(parent.width, 300)
                                             fillMode: Image.PreserveAspectFit
                                             source: {
-                                                if (!basecampMode && api) {
-                                                    var p = api.resolveMediaPath(modelData.cid)
-                                                    return p && p.length > 0 ? "file://" + p : ""
+                                                var p = ""
+                                                if (basecampMode) {
+                                                    p = resolveMedia(modelData.cid)
+                                                } else if (api) {
+                                                    p = api.resolveMediaPath(modelData.cid)
                                                 }
-                                                return ""
+                                                return p && p.length > 0 ? "file://" + p : ""
                                             }
                                             visible: source.toString().length > 0
 
@@ -968,7 +1163,8 @@ Rectangle {
                                                 font.pixelSize: 11
                                             }
                                             Component.onCompleted: {
-                                                if (!basecampMode && api) api.fetchMedia(modelData.cid)
+                                                if (basecampMode) fetchMediaBc(modelData.cid)
+                                                else if (api) api.fetchMedia(modelData.cid)
                                             }
                                         }
                                     }
@@ -1083,8 +1279,7 @@ Rectangle {
                             ToolTip.text: "Attach image"
                             onClicked: {
                                 if (basecampMode) {
-                                    // TODO: file attachment via storage module IPC
-                                    statusText = "File attachment coming soon"
+                                    attachPathDialog.open()
                                 } else if (api) {
                                     api.openFilePicker()
                                 }
@@ -1264,6 +1459,69 @@ Rectangle {
                 }
             }
         }
+    }
+
+    // ── Attach file dialog (Basecamp mode) ─────────────────────────────────
+    Dialog {
+        id: attachPathDialog
+        title: "Attach Image"
+        anchors.centerIn: parent
+        width: 420
+        modal: true
+        standardButtons: Dialog.Ok | Dialog.Cancel
+
+        background: Rectangle {
+            color: theme.bgSecondary
+            border.color: theme.border
+            border.width: 1
+            radius: 12
+        }
+
+        header: Item {
+            height: 40
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 24
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Attach Image"
+                color: theme.text
+                font.pixelSize: 16
+                font.weight: Font.Bold
+            }
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 10
+            Text {
+                text: "Enter the full path to the image file"
+                color: theme.textSec
+                font.pixelSize: theme.fontSecondary
+            }
+            TextField {
+                id: attachPathInput
+                Layout.fillWidth: true
+                placeholderText: "/path/to/image.png"
+                placeholderTextColor: theme.textPlace
+                font.pixelSize: theme.fontPrimary
+                color: theme.text
+                background: Rectangle {
+                    color: theme.bgInset
+                    border.color: attachPathInput.activeFocus ? theme.accent : theme.border
+                    border.width: 1
+                    radius: 6
+                }
+            }
+        }
+
+        onAccepted: {
+            var path = attachPathInput.text.trim()
+            if (path.length > 0) {
+                if (path.startsWith("~")) path = path  // tilde handled by storage module
+                pendingAttachment = path
+            }
+            attachPathInput.text = ""
+        }
+        onRejected: attachPathInput.text = ""
     }
 
     // ── Standalone mode connections ──────────────────────────────────────────
