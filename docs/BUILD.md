@@ -14,12 +14,25 @@ Yolo Board is a censorship-resistant bulletin board running on the Logos blockch
 
 | Repo | Branch | Description |
 |------|--------|-------------|
-| `vpavlin/zone-sdk-test` | `basecamp` | Yolo Board UI plugin |
-| `vpavlin/logos-zone-sequencer-module` | `master` | Zone sequencer core module (Rust FFI wrapper) |
-| `logos-co/logos-storage-module` | `update_api` | Storage module (Codex wrapper) |
-| `logos-co/logos-cpp-sdk` | `master` | SDK with LogosResult serialization fix |
-| `logos-co/logos-liblogos` | `master` | Core lib with IPC retry + SDK compat fixes |
-| `logos-co/logos-capability-module` | `master` | Capability module with IPC shadowing fix |
+| [vpavlin/zone-sdk-test](https://github.com/vpavlin/zone-sdk-test) | `basecamp` | Yolo Board UI plugin |
+| [vpavlin/logos-zone-sequencer-module](https://github.com/vpavlin/logos-zone-sequencer-module) | `master` | Zone sequencer core module (Rust FFI wrapper) |
+| [vpavlin/logos-storage-module](https://github.com/vpavlin/logos-storage-module) | `update_api` | Storage module (Codex wrapper) |
+| [vpavlin/logos-cpp-sdk](https://github.com/vpavlin/logos-cpp-sdk) | `logos-result-serialization-fix` | SDK with LogosResult serialization fix |
+| [vpavlin/logos-liblogos](https://github.com/vpavlin/logos-liblogos) | `ipc-fixes` | Core lib with IPC retry + SDK compat fixes |
+| [vpavlin/logos-capability-module](https://github.com/vpavlin/logos-capability-module) | `fix-ipc-shadowing` | Capability module with IPC shadowing fix |
+
+## Clone
+
+```bash
+mkdir -p ~/yolo-board-build && cd ~/yolo-board-build
+
+git clone -b basecamp git@github.com:vpavlin/zone-sdk-test.git
+git clone git@github.com:vpavlin/logos-zone-sequencer-module.git
+git clone -b update_api git@github.com:vpavlin/logos-storage-module.git
+git clone -b logos-result-serialization-fix git@github.com:vpavlin/logos-cpp-sdk.git
+git clone -b ipc-fixes git@github.com:vpavlin/logos-liblogos.git
+git clone -b fix-ipc-shadowing git@github.com:vpavlin/logos-capability-module.git
+```
 
 ## Build Steps
 
@@ -28,22 +41,23 @@ Yolo Board is a censorship-resistant bulletin board running on the Logos blockch
 ```bash
 cd logos-zone-sequencer-module
 nix build .#plugin
+cd ..
 ```
 
 ### 2. Build storage module
 
 ```bash
 cd logos-storage-module
-git checkout update_api
 nix build
+cd ..
 ```
 
 ### 3. Build yolo-board plugin
 
 ```bash
 cd zone-sdk-test
-git checkout basecamp
 nix build .#plugin -o result-plugin
+cd ..
 ```
 
 ### 4. Build logos-liblogos (patched logos_host)
@@ -52,7 +66,8 @@ This is needed for the `LogosResult` → JSON serialization fix and the `informM
 
 ```bash
 cd logos-liblogos
-nix build --override-input logos-cpp-sdk path:/path/to/logos-cpp-sdk
+nix build --override-input logos-cpp-sdk path:../logos-cpp-sdk
+cd ..
 ```
 
 ## Install
