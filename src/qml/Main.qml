@@ -30,6 +30,19 @@ Rectangle {
     property bool storageIsReady: false
     property int pollTimerId: -1
 
+    Component.onCompleted: {
+        if (basecampMode) {
+            var cfg = callZone("load_ui_config", [])
+            try {
+                var c = JSON.parse(cfg)
+                if (c.dataDir) dataDir = c.dataDir
+                if (c.nodeUrl) nodeUrl = c.nodeUrl
+                if (dataDir.length > 0 && nodeUrl.length > 0)
+                    doConnect()
+            } catch(e) {}
+        }
+    }
+
     // ── Basecamp Dark Theme ──────────────────────────────────────────────────
     QtObject {
         id: theme
@@ -208,10 +221,40 @@ Rectangle {
             }
             isConnected = true
             statusText = "Connected to " + nodeUrl
+            callZone("save_ui_config", [JSON.stringify({ dataDir: dir, nodeUrl: nodeUrl })])
+            loadSubscriptions()
             startPolling()
         } else {
             statusText = result || "Failed to connect"
         }
+    }
+
+    function saveSubscriptions() {
+        if (!basecampMode) return
+        var subs = []
+        for (var i = 0; i < channelList.length; i++) {
+            if (channelList[i].id !== ownChannelId)
+                subs.push(channelList[i].id)
+        }
+        callZone("save_subscriptions", [JSON.stringify(subs)])
+    }
+
+    function loadSubscriptions() {
+        if (!basecampMode) return
+        var json = callZone("load_subscriptions", [])
+        try {
+            var subs = JSON.parse(json)
+            if (!Array.isArray(subs)) return
+            var newList = channelList.slice()
+            for (var i = 0; i < subs.length; i++) {
+                var chId = subs[i]
+                if (chId && !hasChannel(chId)) {
+                    newList.push({ id: chId, name: channelDisplayName(chId), isOwn: false })
+                    fetchMessages(chId)
+                }
+            }
+            channelList = newList
+        } catch(e) {}
     }
 
     function hasChannel(id) {
@@ -249,6 +292,28 @@ Rectangle {
         channelList = newList
         statusText = "Subscribed to " + channelDisplayName(channelId)
         fetchMessages(channelId)
+        saveSubscriptions()
+    }
+
+    function doUnsubscribe() {
+        if (!basecampMode) {
+            if (api) {
+                var ch = api.currentChannelId()
+                if (ch) api.unsubscribe(ch)
+            }
+            return
+        }
+        var chId = currentChannelId()
+        if (!chId || chId === ownChannelId) return
+        var newList = channelList.filter(function(c) { return c.id !== chId })
+        channelList = newList
+        var am = Object.assign({}, allMessages)
+        delete am[chId]
+        allMessages = am
+        if (currentChannelIndex >= channelList.length)
+            currentChannelIndex = Math.max(0, channelList.length - 1)
+        updateMessages()
+        saveSubscriptions()
     }
 
     function doSelectChannel(index) {
@@ -333,6 +398,88 @@ Rectangle {
         var chId = currentChannelId()
         if (!chId) { messagesList = []; return }
         messagesList = allMessages[chId] || []
+    }
+
+    // ── Backfill ────────────────────────────────────────────────────────────
+
+    property string backfillChannelId: ""
+    property string backfillCursor: ""
+    property bool backfillRunning: false
+
+    function doStartBackfill(channelId) {
+        if (!basecampMode) {
+            if (api) api.startBackfill(channelId)
+            return
+        }
+        // Backfill disabled in Basecamp mode — logos.callModule() is synchronous
+        // and freezes the UI during network calls. Needs async IPC support.
+        statusText = "Backfill not yet available in Basecamp mode"
+    }
+
+    function doStopBackfill(channelId) {
+        if (!basecampMode) {
+            if (api) api.stopBackfill(channelId)
+            return
+        }
+        backfillTimer.stop()
+        backfillRunning = false
+        var bp = Object.assign({}, backfillProgressMap)
+        delete bp[channelId]
+        backfillProgressMap = bp
+    }
+
+    Timer {
+        id: backfillTimer
+        interval: 100
+        repeat: true
+        onTriggered: {
+            var channelId = backfillChannelId
+            var result = callZone("query_channel_paged", [channelId, backfillCursor, 100])
+            if (!result || result.length === 0) { doStopBackfill(channelId); return }
+
+            try { var root = JSON.parse(result) } catch(e) { doStopBackfill(channelId); return }
+            if (!root || typeof root !== "object") { doStopBackfill(channelId); return }
+
+            var cursorSlot = root.cursor_slot || 0
+            var libSlot = root.lib_slot || 1
+            var done = root.done || false
+            var bp = Object.assign({}, backfillProgressMap)
+            bp[channelId] = libSlot > 0 ? Math.min(1.0, cursorSlot / libSlot) : 0
+            backfillProgressMap = bp
+
+            var msgs = root.messages || []
+            if (msgs.length > 0) {
+                var existing = (allMessages[channelId] || []).slice()
+                var seenIds = {}
+                for (var i = 0; i < existing.length; i++) seenIds[existing[i].id] = true
+
+                var prepend = []
+                for (var j = 0; j < msgs.length; j++) {
+                    if (seenIds[msgs[j].id]) continue
+                    var parsed = parseMessagePayload(msgs[j].data)
+                    prepend.push({
+                        id: msgs[j].id, data: msgs[j].data,
+                        displayText: parsed.text, media: parsed.media,
+                        channel: channelId, isOwn: channelId === ownChannelId,
+                        timestamp: "", pending: false, failed: false
+                    })
+                }
+                if (prepend.length > 0) {
+                    var am = Object.assign({}, allMessages)
+                    am[channelId] = prepend.concat(existing)
+                    allMessages = am
+                    updateMessages()
+                }
+            }
+
+            if (done) {
+                doStopBackfill(channelId)
+                statusText = "Backfill complete for " + channelDisplayName(channelId)
+                return
+            }
+
+            backfillCursor = JSON.stringify(root.cursor || {})
+        }
     }
 
     function doPublish() {
@@ -552,10 +699,10 @@ Rectangle {
                                         MouseArea {
                                             anchors.fill: parent
                                             onClicked: {
-                                                if (!basecampMode && api) {
-                                                    if (chDelegate.backfilling) api.stopBackfill(chDelegate.chId)
-                                                    else api.startBackfill(chDelegate.chId)
-                                                }
+                                                if (chDelegate.backfilling)
+                                                    doStopBackfill(chDelegate.chId)
+                                                else
+                                                    doStartBackfill(chDelegate.chId)
                                             }
                                         }
                                     }
@@ -671,10 +818,7 @@ Rectangle {
                                     }
                                     enabled: getChannelList().length > 0
                                     onClicked: {
-                                        if (!basecampMode && api) {
-                                            var ch = api.currentChannelId()
-                                            if (ch) api.unsubscribe(ch)
-                                        }
+                                        doUnsubscribe()
                                     }
                                 }
                             }
@@ -906,7 +1050,7 @@ Rectangle {
                         spacing: 10
 
                         Button {
-                            visible: !basecampMode
+                            visible: true
                             contentItem: Text {
                                 text: "+"
                                 color: theme.textMuted
@@ -920,7 +1064,14 @@ Rectangle {
                             }
                             ToolTip.visible: hovered
                             ToolTip.text: "Attach image"
-                            onClicked: { if (api) api.openFilePicker() }
+                            onClicked: {
+                                if (basecampMode) {
+                                    // TODO: file attachment via storage module IPC
+                                    statusText = "File attachment coming soon"
+                                } else if (api) {
+                                    api.openFilePicker()
+                                }
+                            }
                         }
 
                         TextField {
