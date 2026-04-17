@@ -31,14 +31,18 @@ Rectangle {
     property int pollTimerId: -1
 
     Component.onCompleted: {
-        if (basecampMode) {
+        if (basecampMode) startupTimer.start()
+    }
+    Timer {
+        id: startupTimer
+        interval: 500
+        repeat: false
+        onTriggered: {
             var cfg = callZone("load_ui_config", [])
             try {
                 var c = JSON.parse(cfg)
                 if (c.dataDir) dataDir = c.dataDir
                 if (c.nodeUrl) nodeUrl = c.nodeUrl
-                if (dataDir.length > 0 && nodeUrl.length > 0)
-                    doConnect()
             } catch(e) {}
         }
     }
