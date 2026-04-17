@@ -104,7 +104,7 @@
               mkdir -p $out/lib
               cp libyolo_board_plugin.so $out/lib/yolo_board.so
               cp ${rustLib}/lib/libzone_sequencer_rs.so $out/lib/
-              cp ${src}/resources/Yolo.png $out/lib/yolo.png
+              cp $src/resources/Yolo.png $out/lib/yolo.png
               runHook postInstall
             '';
             postFixup = ''
