@@ -209,14 +209,13 @@ YoloBoardBackend::YoloBoardBackend(LogosAPI* logosAPI, QObject* parent)
     m_pollTimer->setInterval(kPollIntervalMs);
     connect(m_pollTimer, &QTimer::timeout, this, &YoloBoardBackend::pollMessages);
 
-    if (m_logosAPI) {
-#ifdef LOGOS_CORE_AVAILABLE
-        m_zoneClient = m_logosAPI->getClient(kZoneModuleName);
-#endif
-        setStatus("Waiting for configuration...");
-    } else {
-        setStatus("No Logos API — standalone mode");
-    }
+    // Use direct Rust FFI in all modes. The LogosAPI module path is blocked by
+    // a framework bug (capability_module's informModuleToken reports "LogosAPI
+    // not available", preventing token auth for inter-module calls).
+    // The Rust FFI lib (libzone_sequencer_rs.so) is bundled with the plugin,
+    // so direct FFI works identically in both standalone and Basecamp.
+    Q_UNUSED(m_logosAPI);
+    setStatus("Waiting for configuration...");
 
     loadSettings();
 }
@@ -323,24 +322,52 @@ void YoloBoardBackend::initZoneSequencer() {
         if (isStandalone()) {
             m_ownChannelId = deriveChannelId(m_signingKey);
         } else {
-            invokeZone("set_node_url", {m_nodeUrl});
-            invokeZone("set_signing_key", {m_signingKey});
-            if (!m_dataDir.isEmpty())
-                invokeZone("set_checkpoint_path", {m_dataDir + "/sequencer.checkpoint"});
-            m_ownChannelId = invokeZone("get_channel_id").toString();
-            if (!m_ownChannelId.isEmpty() && !m_ownChannelId.startsWith("Error:"))
-                invokeZone("set_channel_id", {m_ownChannelId});
+            // Run IPC calls in background to avoid freezing the UI
+            setStatus("Connecting to zone sequencer module...");
+            QString nodeUrl = m_nodeUrl, sigKey = m_signingKey, dataDir = m_dataDir;
+            auto alive = m_alive;
+            QtConcurrent::run([this, alive, nodeUrl, sigKey, dataDir]() {
+                invokeZone("set_node_url", {nodeUrl});
+                invokeZone("set_signing_key", {sigKey});
+                if (!dataDir.isEmpty())
+                    invokeZone("set_checkpoint_path", {dataDir + "/sequencer.checkpoint"});
+                QString chId = invokeZone("get_channel_id").toString();
+                if (!chId.isEmpty() && !chId.startsWith("Error:"))
+                    invokeZone("set_channel_id", {chId});
+                QMetaObject::invokeMethod(this, [this, alive, chId]() {
+                    if (!alive->load()) return;
+                    m_ownChannelId = chId;
+                    initZoneSequencerFinish();
+                }, Qt::QueuedConnection);
+            });
+            return;
         }
     } else if (!isStandalone()) {
-        invokeZone("set_node_url", {m_nodeUrl});
-        invokeZone("set_signing_key", {m_signingKey});
-        if (!m_dataDir.isEmpty())
-            invokeZone("set_checkpoint_path", {m_dataDir + "/sequencer.checkpoint"});
-        invokeZone("set_channel_id", {m_ownChannelId});
+        setStatus("Connecting to zone sequencer module...");
+        QString nodeUrl = m_nodeUrl, sigKey = m_signingKey, dataDir = m_dataDir;
+        QString channelId = m_ownChannelId;
+        auto alive = m_alive;
+        QtConcurrent::run([this, alive, nodeUrl, sigKey, dataDir, channelId]() {
+            invokeZone("set_node_url", {nodeUrl});
+            invokeZone("set_signing_key", {sigKey});
+            if (!dataDir.isEmpty())
+                invokeZone("set_checkpoint_path", {dataDir + "/sequencer.checkpoint"});
+            invokeZone("set_channel_id", {channelId});
+            QMetaObject::invokeMethod(this, [this, alive]() {
+                if (!alive->load()) return;
+                initZoneSequencerFinish();
+            }, Qt::QueuedConnection);
+        });
+        return;
     }
 
+    initZoneSequencerFinish();
+}
+
+void YoloBoardBackend::initZoneSequencerFinish() {
     if (m_ownChannelId.isEmpty() || m_ownChannelId.startsWith("Error:")) {
         qWarning() << "YoloBoardBackend: could not determine own channel ID";
+        setStatus("Error: " + m_ownChannelId);
         return;
     }
 

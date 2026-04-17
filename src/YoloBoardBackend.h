@@ -118,6 +118,7 @@ private:
     void mergeMessages(const QString& channelId, const QString& json);
     void setStatus(const QString& msg);
     void initZoneSequencer();
+    void initZoneSequencerFinish();
     void loadSettings();
     void saveSettings();
     void saveSubscriptions();
