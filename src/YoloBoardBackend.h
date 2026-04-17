@@ -66,6 +66,7 @@ class YoloBoardBackend : public QObject {
     Q_PROPERTY(QString storageUrl READ storageUrl WRITE setStorageUrl NOTIFY storageUrlChanged)
     Q_PROPERTY(QString pendingAttachmentPreview READ pendingAttachmentPreview NOTIFY pendingAttachmentChanged)
     Q_PROPERTY(bool uploading READ uploading NOTIFY uploadingChanged)
+    Q_PROPERTY(bool storageReady READ storageReady NOTIFY storageReadyChanged)
 
 public:
     explicit YoloBoardBackend(LogosAPI* logosAPI, QObject* parent = nullptr);
@@ -84,6 +85,7 @@ public:
     QString storageUrl() const { return m_storageUrl; }
     QString pendingAttachmentPreview() const;
     bool uploading() const { return m_uploading; }
+    bool storageReady() const { return m_storageStarted; }
 
     Q_INVOKABLE void subscribe(const QString& channelIdOrName);
     Q_INVOKABLE void unsubscribe(const QString& channelId);
@@ -125,6 +127,7 @@ signals:
     void pendingAttachmentChanged();
     void uploadingChanged();
     void mediaReady(const QString& cid, const QString& localPath);
+    void storageReadyChanged();
 
 private slots:
     void pollMessages();

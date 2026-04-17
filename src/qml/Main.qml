@@ -58,9 +58,22 @@ Rectangle {
                 anchors.rightMargin: 16
                 spacing: 10
 
-                Rectangle {
-                    width: 8; height: 8; radius: 4
-                    color: backend.connected ? theme.success : theme.error
+                Text {
+                    text: "\u2B21"
+                    font.pixelSize: 16
+                    font.family: "Noto Sans Symbols2"
+                    color: backend.connected ? theme.accent : theme.textPlace
+                    ToolTip.visible: chainMouse.containsMouse
+                    ToolTip.text: backend.connected ? "Chain: connected" : "Chain: disconnected"
+                    MouseArea { id: chainMouse; anchors.fill: parent; hoverEnabled: true }
+                }
+                Text {
+                    text: "\u25A4"
+                    font.pixelSize: 14
+                    color: backend.storageReady ? theme.accent : theme.textPlace
+                    ToolTip.visible: storageMouse.containsMouse
+                    ToolTip.text: backend.storageReady ? "Storage: ready" : "Storage: not ready"
+                    MouseArea { id: storageMouse; anchors.fill: parent; hoverEnabled: true }
                 }
                 Text {
                     text: "Yolo Board"
