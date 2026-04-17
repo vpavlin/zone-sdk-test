@@ -427,29 +427,43 @@ Rectangle {
                                 Repeater {
                                     model: modelData.media || []
                                     delegate: Item {
-                                        width: parent.width
-                                        height: mediaImg.status === Image.Ready ? mediaImg.paintedHeight + 8 : (mediaPlaceholder.visible ? 40 : 0)
+                                        required property var modelData
+                                        width: parent ? parent.width : 0
+                                        height: mediaImg.status === Image.Ready
+                                                ? mediaImg.paintedHeight + 8
+                                                : 40
                                         Image {
                                             id: mediaImg
                                             width: Math.min(parent.width, 300)
                                             fillMode: Image.PreserveAspectFit
+                                            asynchronous: true
+                                            cache: false
                                             source: {
+                                                if (!modelData.cid || modelData.cid === "uploading") return ""
                                                 var p = resolveMedia(modelData.cid)
                                                 return p && p.length > 0 ? "file://" + p : ""
                                             }
-                                            visible: source.toString().length > 0
+                                            visible: status === Image.Ready
                                             MouseArea {
                                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                                 onClicked: Qt.openUrlExternally(mediaImg.source)
                                             }
                                         }
                                         Rectangle {
-                                            id: mediaPlaceholder
-                                            visible: mediaImg.source.toString().length === 0
+                                            visible: mediaImg.status !== Image.Ready
                                             width: 200; height: 32; radius: 4
                                             color: theme.surface
-                                            Text { anchors.centerIn: parent; text: "Loading image\u2026"; color: theme.textMuted; font.pixelSize: 11 }
-                                            Component.onCompleted: doFetchMedia(modelData.cid)
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: modelData.cid === "uploading" ? "Uploading\u2026"
+                                                      : mediaImg.status === Image.Error ? "Image unavailable"
+                                                      : "Loading image\u2026"
+                                                color: theme.textMuted; font.pixelSize: 11
+                                            }
+                                            Component.onCompleted: {
+                                                if (modelData.cid && modelData.cid !== "uploading")
+                                                    doFetchMedia(modelData.cid)
+                                            }
                                         }
                                     }
                                 }
