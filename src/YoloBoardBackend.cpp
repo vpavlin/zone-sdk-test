@@ -386,6 +386,7 @@ void YoloBoardBackend::initStorageModule() {
     QVariant startResult = invokeStorage("start", {});
     qInfo() << "Storage start:" << startResult;
     m_storageStarted = true;
+    emit storageReadyChanged();
 #endif
 }
 
