@@ -8,6 +8,28 @@ Rectangle {
     height: 600
     color: theme.bg
 
+    // ── Backend access ──────────────────────────────────────────────────────
+    // Basecamp injects "logos" (LogosQmlBridge) for IPC to core modules.
+    // Standalone injects "backend" (YoloBoardBackend C++ object).
+    readonly property bool basecampMode: typeof logos !== "undefined" && logos !== null
+    readonly property var api: basecampMode ? null : (typeof backend !== "undefined" ? backend : null)
+
+    // ── State (managed in QML for Basecamp mode) ────────────────────────────
+    property var channelList: []
+    property var messagesList: []
+    property int currentChannelIndex: 0
+    property string ownChannelId: ""
+    property bool isConnected: false
+    property string statusText: "Waiting for configuration..."
+    property var unreadCounts: ({})
+    property string nodeUrl: "http://localhost:8080"
+    property var backfillProgressMap: ({})
+    property string dataDir: ""
+    property string pendingAttachment: ""
+    property bool isUploading: false
+    property bool storageIsReady: false
+    property int pollTimerId: -1
+
     // ── Basecamp Dark Theme ──────────────────────────────────────────────────
     QtObject {
         id: theme
@@ -36,10 +58,333 @@ Rectangle {
         readonly property int fontSecondary: 12
     }
 
-    property bool showSetup: backend.ownChannelId === ""
+    // ── Helpers for dual mode ───────────────────────────────────────────────
+
+    function getChannelList() {
+        if (!basecampMode) return api ? api.channelList : []
+        return channelList
+    }
+    function getMessages() {
+        if (!basecampMode) return api ? api.messages : []
+        return messagesList
+    }
+    function getCurrentChannelIndex() {
+        if (!basecampMode) return api ? api.currentChannelIndex : 0
+        return currentChannelIndex
+    }
+    function getOwnChannelId() {
+        if (!basecampMode) return api ? api.ownChannelId : ""
+        return ownChannelId
+    }
+    function getConnected() {
+        if (!basecampMode) return api ? api.connected : false
+        return isConnected
+    }
+    function getStatus() {
+        if (!basecampMode) return api ? api.status : ""
+        return statusText
+    }
+    function getUnreadCounts() {
+        if (!basecampMode) return api ? api.unreadCounts : ({})
+        return unreadCounts
+    }
+    function getNodeUrl() {
+        if (!basecampMode) return api ? api.nodeUrl : ""
+        return nodeUrl
+    }
+    function getBackfillProgress() {
+        if (!basecampMode) return api ? api.backfillProgress : ({})
+        return backfillProgressMap
+    }
+    function getDataDir() {
+        if (!basecampMode) return api ? api.dataDir : ""
+        return dataDir
+    }
+    function getPendingAttachment() {
+        if (!basecampMode) return api ? (api.pendingAttachmentPreview || "") : ""
+        return pendingAttachment
+    }
+    function getUploading() {
+        if (!basecampMode) return api ? api.uploading : false
+        return isUploading
+    }
+    function getStorageReady() {
+        if (!basecampMode) return api ? api.storageReady : false
+        return storageIsReady
+    }
+
+    property bool showSetup: getOwnChannelId() === ""
 
     palette.highlight: theme.accent
     palette.highlightedText: theme.text
+
+    // ── Basecamp IPC helpers ────────────────────────────────────────────────
+
+    function callZone(method, args) {
+        if (!basecampMode) return ""
+        return logos.callModule("liblogos_zone_sequencer_module", method, args || [])
+    }
+
+    function callStorage(method, args) {
+        if (!basecampMode) return ""
+        return logos.callModule("storage_module", method, args || [])
+    }
+
+    function encodeChannelName(name) {
+        var prefix = "logos:yolo:"
+        var raw = prefix + name
+        if (raw.length > 32) return ""
+        while (raw.length < 32) raw += "\0"
+        var hex = ""
+        for (var i = 0; i < raw.length; i++) {
+            var c = raw.charCodeAt(i).toString(16)
+            hex += c.length < 2 ? "0" + c : c
+        }
+        return hex
+    }
+
+    function decodeChannelName(hexId) {
+        if (hexId.length !== 64) return ""
+        var bytes = ""
+        for (var i = 0; i < hexId.length; i += 2) {
+            bytes += String.fromCharCode(parseInt(hexId.substr(i, 2), 16))
+        }
+        var prefix = "logos:yolo:"
+        if (bytes.substr(0, prefix.length) !== prefix) return ""
+        var name = bytes.substr(prefix.length).replace(/\0+$/, "")
+        return name
+    }
+
+    function channelDisplayName(channelId) {
+        var name = decodeChannelName(channelId)
+        if (name.length > 0) return name
+        if (channelId.length > 12) return channelId.substr(0, 12) + "\u2026"
+        return channelId
+    }
+
+    function parseMessagePayload(data) {
+        if (!data || data.charAt(0) !== '{') return { text: data || "", media: [] }
+        try {
+            var obj = JSON.parse(data)
+            if (!obj.v) return { text: data, media: [] }
+            return { text: obj.text || "", media: obj.media || [] }
+        } catch(e) {
+            return { text: data, media: [] }
+        }
+    }
+
+    function currentChannelId() {
+        var list = getChannelList()
+        var idx = getCurrentChannelIndex()
+        if (idx < 0 || idx >= list.length) return ""
+        return basecampMode ? list[idx].id : (list[idx].id || "")
+    }
+
+    // ── Basecamp mode: IPC actions ──────────────────────────────────────────
+
+    function doConnect() {
+        if (!basecampMode) {
+            if (api) {
+                api.configureDataDir(dataDirInput.text)
+                api.configureNodeUrl(nodeInput.text)
+                api.connectToNode()
+            }
+            return
+        }
+
+        var dir = dataDirInput.text.trim()
+        nodeUrl = nodeInput.text.trim()
+        statusText = "Connecting..."
+
+        callZone("set_node_url", [nodeUrl])
+
+        var result = callZone("load_from_directory", [dir])
+        console.log("load_from_directory:", result)
+
+        if (result && result.indexOf("Error") !== 0 && result.length > 0) {
+            ownChannelId = result
+            if (!hasChannel(ownChannelId)) {
+                channelList = [{ id: ownChannelId, name: channelDisplayName(ownChannelId), isOwn: true }].concat(channelList)
+            }
+            isConnected = true
+            statusText = "Connected to " + nodeUrl
+            startPolling()
+        } else {
+            statusText = result || "Failed to connect"
+        }
+    }
+
+    function hasChannel(id) {
+        for (var i = 0; i < channelList.length; i++)
+            if (channelList[i].id === id) return true
+        return false
+    }
+
+    function doSubscribe() {
+        var ch = subInput.text.trim()
+        if (ch.length === 0) return
+        subInput.text = ""
+
+        var channelId = ch
+        if (!/^[0-9a-fA-F]{64}$/.test(channelId)) {
+            channelId = encodeChannelName(channelId)
+            if (channelId.length === 0) {
+                statusText = "Name too long"
+                return
+            }
+        }
+
+        if (!basecampMode) {
+            if (api) api.subscribe(ch)
+            return
+        }
+
+        if (hasChannel(channelId)) {
+            statusText = "Already subscribed"
+            return
+        }
+
+        var newList = channelList.slice()
+        newList.push({ id: channelId, name: channelDisplayName(channelId), isOwn: false })
+        channelList = newList
+        statusText = "Subscribed to " + channelDisplayName(channelId)
+        fetchMessages(channelId)
+    }
+
+    function doSelectChannel(index) {
+        if (!basecampMode) {
+            if (api) api.selectChannel(index)
+            return
+        }
+        if (index < 0 || index >= channelList.length) return
+        currentChannelIndex = index
+        var chId = channelList[index].id
+        if (unreadCounts[chId] > 0) {
+            var uc = Object.assign({}, unreadCounts)
+            uc[chId] = 0
+            unreadCounts = uc
+        }
+        updateMessages()
+    }
+
+    // ── Polling ─────────────────────────────────────────────────────────────
+
+    property var allMessages: ({})
+
+    function startPolling() {
+        if (pollTimerId >= 0) return
+        pollTimerId = setInterval(function() {
+            for (var i = 0; i < channelList.length; i++)
+                fetchMessages(channelList[i].id)
+        }, 3000)
+    }
+
+    function fetchMessages(channelId) {
+        if (!basecampMode) return
+        var result = callZone("query_channel", [channelId, 50])
+        if (!result || result.length === 0) return
+
+        try {
+            var arr = JSON.parse(result)
+            if (!Array.isArray(arr)) return
+        } catch(e) { return }
+
+        var existing = allMessages[channelId] || []
+        var seenIds = {}
+        for (var i = 0; i < existing.length; i++)
+            seenIds[existing[i].id] = true
+
+        var added = false
+        for (var j = 0; j < arr.length; j++) {
+            var item = arr[j]
+            if (seenIds[item.id]) continue
+            var parsed = parseMessagePayload(item.data)
+            existing.push({
+                id: item.id,
+                data: item.data,
+                displayText: parsed.text,
+                media: parsed.media,
+                channel: channelId,
+                isOwn: channelId === ownChannelId,
+                timestamp: new Date().toLocaleTimeString(Qt.locale(), "HH:mm:ss"),
+                pending: false,
+                failed: false
+            })
+            seenIds[item.id] = true
+            added = true
+
+            if (channelId !== currentChannelId()) {
+                var uc = Object.assign({}, unreadCounts)
+                uc[channelId] = (uc[channelId] || 0) + 1
+                unreadCounts = uc
+            }
+        }
+
+        if (added) {
+            var am = Object.assign({}, allMessages)
+            am[channelId] = existing
+            allMessages = am
+            if (!isConnected) isConnected = true
+            updateMessages()
+        }
+    }
+
+    function updateMessages() {
+        var chId = currentChannelId()
+        if (!chId) { messagesList = []; return }
+        messagesList = allMessages[chId] || []
+    }
+
+    function doPublish() {
+        var msg = composeInput.text.trim()
+        var hasAttach = getPendingAttachment().length > 0
+        if (msg.length === 0 && !hasAttach) return
+        composeInput.text = ""
+
+        if (!basecampMode) {
+            if (api) {
+                if (hasAttach) api.publishWithAttachment(msg)
+                else api.publish(msg)
+            }
+            return
+        }
+
+        if (msg.length === 0) return
+
+        // Optimistic add
+        var pendingId = "pending-" + Date.now()
+        var parsed = parseMessagePayload(msg)
+        var existing = (allMessages[ownChannelId] || []).slice()
+        existing.push({
+            id: pendingId, data: msg, displayText: parsed.text, media: parsed.media,
+            channel: ownChannelId, isOwn: true,
+            timestamp: new Date().toLocaleTimeString(Qt.locale(), "HH:mm:ss"),
+            pending: true, failed: false
+        })
+        var am = Object.assign({}, allMessages)
+        am[ownChannelId] = existing
+        allMessages = am
+        updateMessages()
+
+        statusText = "Publishing\u2026"
+        var result = callZone("publish", [msg])
+        var ok = result && result.length > 0 && result.indexOf("Error") !== 0
+
+        // Update pending message
+        var msgs = (allMessages[ownChannelId] || []).slice()
+        for (var i = 0; i < msgs.length; i++) {
+            if (msgs[i].id === pendingId) {
+                msgs[i] = Object.assign({}, msgs[i], { pending: false, failed: !ok })
+                if (ok) msgs[i].id = result
+                break
+            }
+        }
+        am = Object.assign({}, allMessages)
+        am[ownChannelId] = msgs
+        allMessages = am
+        updateMessages()
+        statusText = ok ? "Published: " + result.substr(0, 12) + "\u2026" : "Publish failed: " + result
+    }
 
     // ── Main Layout ──────────────────────────────────────────────────────────
     ColumnLayout {
@@ -62,17 +407,17 @@ Rectangle {
                     text: "\u2B21"
                     font.pixelSize: 16
                     font.family: "Noto Sans Symbols2"
-                    color: backend.connected ? theme.accent : theme.textPlace
+                    color: getConnected() ? theme.accent : theme.textPlace
                     ToolTip.visible: chainMouse.containsMouse
-                    ToolTip.text: backend.connected ? "Chain: connected" : "Chain: disconnected"
+                    ToolTip.text: getConnected() ? "Chain: connected" : "Chain: disconnected"
                     MouseArea { id: chainMouse; anchors.fill: parent; hoverEnabled: true }
                 }
                 Text {
                     text: "\u25A4"
                     font.pixelSize: 14
-                    color: backend.storageReady ? theme.accent : theme.textPlace
+                    color: getStorageReady() ? theme.accent : theme.textPlace
                     ToolTip.visible: storageMouse.containsMouse
-                    ToolTip.text: backend.storageReady ? "Storage: ready" : "Storage: not ready"
+                    ToolTip.text: getStorageReady() ? "Storage: ready" : "Storage: not ready"
                     MouseArea { id: storageMouse; anchors.fill: parent; hoverEnabled: true }
                 }
                 Text {
@@ -83,22 +428,20 @@ Rectangle {
                 }
                 Item { Layout.fillWidth: true }
                 Text {
-                    text: backend.ownChannelId.length > 0
-                          ? backend.channelDisplayName(backend.ownChannelId)
-                          : ""
+                    text: getOwnChannelId().length > 0 ? channelDisplayName(getOwnChannelId()) : ""
                     color: theme.textMuted
                     font.pixelSize: theme.fontSecondary
                 }
                 Rectangle {
                     width: 1; height: 20
                     color: theme.border
-                    visible: backend.nodeUrl.length > 0
+                    visible: getNodeUrl().length > 0
                 }
                 Text {
-                    text: backend.nodeUrl
+                    text: getNodeUrl()
                     color: theme.textMuted
                     font.pixelSize: theme.fontSecondary
-                    visible: backend.nodeUrl.length > 0
+                    visible: getNodeUrl().length > 0
                 }
             }
 
@@ -125,7 +468,6 @@ Rectangle {
                     anchors.fill: parent
                     spacing: 0
 
-                    // Sidebar header
                     Item {
                         Layout.fillWidth: true
                         height: 36
@@ -142,19 +484,25 @@ Rectangle {
                     }
 
                     ListView {
-                        id: channelList
+                        id: channelListView
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        model: backend.channels
+                        model: getChannelList()
 
                         delegate: Column {
                             id: chDelegate
-                            width: channelList.width
+                            width: channelListView.width
 
-                            property real backfillProg: backend.backfillProgress[modelData] || -1
+                            required property var modelData
+                            required property int index
+
+                            property string chId: modelData.id || ""
+                            property string chName: modelData.name || ""
+                            property bool chIsOwn: modelData.isOwn === true
+                            property real backfillProg: getBackfillProgress()[chId] || -1
                             property bool backfilling: backfillProg >= 0
-                            property bool selected: index === backend.currentChannelIndex
+                            property bool selected: index === getCurrentChannelIndex()
                             property bool hovered: chMouse.containsMouse
 
                             Rectangle {
@@ -164,14 +512,12 @@ Rectangle {
                                      : chDelegate.hovered ? Qt.rgba(1,1,1,0.04)
                                      : "transparent"
                                 radius: 4
-                                anchors.leftMargin: 4
-                                anchors.rightMargin: 4
 
                                 MouseArea {
                                     id: chMouse
                                     anchors.fill: parent
                                     hoverEnabled: true
-                                    onClicked: backend.currentChannelIndex = index
+                                    onClicked: doSelectChannel(chDelegate.index)
                                 }
 
                                 RowLayout {
@@ -182,16 +528,15 @@ Rectangle {
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: backend.channelDisplayName(modelData)
+                                        text: chDelegate.chName
                                         color: chDelegate.selected ? theme.text
-                                             : modelData === backend.ownChannelId ? theme.accent
+                                             : chDelegate.chIsOwn ? theme.accent
                                              : theme.textSec
                                         font.pixelSize: theme.fontSecondary
                                         font.weight: chDelegate.selected ? Font.Medium : Font.Normal
                                         elide: Text.ElideRight
                                     }
 
-                                    // Backfill button
                                     Rectangle {
                                         visible: chDelegate.backfilling || chDelegate.selected
                                         width: 20; height: 20; radius: 10; z: 1
@@ -200,29 +545,28 @@ Rectangle {
                                         border.width: 1
                                         Text {
                                             anchors.centerIn: parent
-                                            text: "⟳"
+                                            text: "\u27F3"
                                             color: chDelegate.backfilling ? theme.text : theme.textMuted
                                             font.pixelSize: 12
                                         }
                                         MouseArea {
                                             anchors.fill: parent
                                             onClicked: {
-                                                if (chDelegate.backfilling)
-                                                    backend.stopBackfill(modelData)
-                                                else
-                                                    backend.startBackfill(modelData)
+                                                if (!basecampMode && api) {
+                                                    if (chDelegate.backfilling) api.stopBackfill(chDelegate.chId)
+                                                    else api.startBackfill(chDelegate.chId)
+                                                }
                                             }
                                         }
                                     }
 
-                                    // Unread badge
                                     Rectangle {
-                                        visible: (backend.unreadCounts[modelData] || 0) > 0
+                                        visible: (getUnreadCounts()[chDelegate.chId] || 0) > 0
                                         width: 22; height: 18; radius: 9
                                         color: theme.notify
                                         Text {
                                             anchors.centerIn: parent
-                                            text: backend.unreadCounts[modelData] || 0
+                                            text: getUnreadCounts()[chDelegate.chId] || 0
                                             color: theme.text
                                             font.pixelSize: 10
                                             font.weight: Font.Bold
@@ -231,7 +575,6 @@ Rectangle {
                                 }
                             }
 
-                            // Progress bar
                             Item {
                                 visible: chDelegate.backfilling
                                 width: chDelegate.width
@@ -282,7 +625,7 @@ Rectangle {
                             TextField {
                                 id: subInput
                                 Layout.fillWidth: true
-                                placeholderText: "Channel name or ID…"
+                                placeholderText: "Channel name or ID\u2026"
                                 placeholderTextColor: theme.textPlace
                                 font.pixelSize: theme.fontSecondary
                                 color: theme.text
@@ -314,7 +657,7 @@ Rectangle {
                                     onClicked: doSubscribe()
                                 }
                                 Button {
-                                    text: "✕"
+                                    text: "\u2715"
                                     font.pixelSize: theme.fontSecondary
                                     contentItem: Text {
                                         text: parent.text
@@ -326,11 +669,12 @@ Rectangle {
                                         color: parent.down ? theme.error : theme.surface
                                         radius: 4
                                     }
-                                    enabled: backend.currentChannelIndex >= 0 &&
-                                             backend.channels.length > 0
+                                    enabled: getChannelList().length > 0
                                     onClicked: {
-                                        var ch = backend.currentChannelId()
-                                        if (ch) backend.unsubscribe(ch)
+                                        if (!basecampMode && api) {
+                                            var ch = api.currentChannelId()
+                                            if (ch) api.unsubscribe(ch)
+                                        }
                                     }
                                 }
                             }
@@ -338,7 +682,6 @@ Rectangle {
                     }
                 }
 
-                // Right border
                 Rectangle {
                     anchors.right: parent.right
                     width: 1; height: parent.height
@@ -358,13 +701,15 @@ Rectangle {
                     Layout.fillHeight: true
                     clip: true
                     spacing: 1
-                    model: backend.messages
+                    model: getMessages()
                     verticalLayoutDirection: ListView.BottomToTop
 
                     delegate: Rectangle {
                         width: messageList.width
                         height: msgCol.implicitHeight + 16
                         color: msgHover.containsMouse ? Qt.rgba(1,1,1,0.02) : "transparent"
+
+                        required property var modelData
 
                         readonly property bool isOwn:     modelData.isOwn    === true
                         readonly property bool isPending: modelData.pending  === true
@@ -397,11 +742,9 @@ Rectangle {
 
                                 Text {
                                     text: {
-                                        var sender = isOwn
-                                            ? "you"
-                                            : backend.channelDisplayName(modelData.channel || "")
-                                        if (isPending) return sender + "  ·  sending…"
-                                        if (isFailed)  return sender + "  ·  failed"
+                                        var sender = isOwn ? "you" : channelDisplayName(modelData.channel || "")
+                                        if (isPending) return sender + "  \u00B7  sending\u2026"
+                                        if (isFailed)  return sender + "  \u00B7  failed"
                                         return sender
                                     }
                                     color: isFailed ? theme.error
@@ -437,8 +780,11 @@ Rectangle {
                                             width: Math.min(parent.width, 300)
                                             fillMode: Image.PreserveAspectFit
                                             source: {
-                                                var p = backend.resolveMediaPath(modelData.cid)
-                                                return p.length > 0 ? "file://" + p : ""
+                                                if (!basecampMode && api) {
+                                                    var p = api.resolveMediaPath(modelData.cid)
+                                                    return p && p.length > 0 ? "file://" + p : ""
+                                                }
+                                                return ""
                                             }
                                             visible: source.toString().length > 0
 
@@ -456,11 +802,13 @@ Rectangle {
                                             color: theme.surface
                                             Text {
                                                 anchors.centerIn: parent
-                                                text: "Loading image…"
+                                                text: "Loading image\u2026"
                                                 color: theme.textMuted
                                                 font.pixelSize: 11
                                             }
-                                            Component.onCompleted: backend.fetchMedia(modelData.cid)
+                                            Component.onCompleted: {
+                                                if (!basecampMode && api) api.fetchMedia(modelData.cid)
+                                            }
                                         }
                                     }
                                 }
@@ -483,8 +831,8 @@ Rectangle {
                 // Attachment preview
                 Rectangle {
                     Layout.fillWidth: true
-                    height: (backend.pendingAttachmentPreview || "").length > 0 ? 52 : 0
-                    visible: (backend.pendingAttachmentPreview || "").length > 0
+                    height: getPendingAttachment().length > 0 ? 52 : 0
+                    visible: getPendingAttachment().length > 0
                     color: theme.bgSecondary
                     Behavior on height { NumberAnimation { duration: 120 } }
 
@@ -513,7 +861,7 @@ Rectangle {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: backend.pendingAttachmentPreview || ""
+                            text: getPendingAttachment()
                             color: theme.textSec
                             font.pixelSize: theme.fontSecondary
                             elide: Text.ElideMiddle
@@ -530,7 +878,9 @@ Rectangle {
                                 radius: 4
                                 implicitWidth: 28; implicitHeight: 28
                             }
-                            onClicked: backend.clearAttachment()
+                            onClicked: {
+                                if (!basecampMode && api) api.clearAttachment()
+                            }
                         }
                     }
                 }
@@ -556,6 +906,7 @@ Rectangle {
                         spacing: 10
 
                         Button {
+                            visible: !basecampMode
                             contentItem: Text {
                                 text: "+"
                                 color: theme.textMuted
@@ -569,13 +920,13 @@ Rectangle {
                             }
                             ToolTip.visible: hovered
                             ToolTip.text: "Attach image"
-                            onClicked: backend.openFilePicker()
+                            onClicked: { if (api) api.openFilePicker() }
                         }
 
                         TextField {
                             id: composeInput
                             Layout.fillWidth: true
-                            placeholderText: "Type a message…"
+                            placeholderText: "Type a message\u2026"
                             placeholderTextColor: theme.textPlace
                             font.pixelSize: theme.fontPrimary
                             color: theme.text
@@ -585,16 +936,15 @@ Rectangle {
                                 border.width: 1
                                 radius: 6
                             }
-                            enabled: backend.connected
+                            enabled: getConnected()
                             Keys.onReturnPressed: doPublish()
                         }
 
                         Button {
-                            text: backend.uploading ? "Uploading…" : "Publish"
+                            text: getUploading() ? "Uploading\u2026" : "Publish"
                             font.pixelSize: theme.fontPrimary
-                            enabled: backend.connected && !backend.uploading
-                                     && (composeInput.text.length > 0
-                                         || (backend.pendingAttachmentPreview || "").length > 0)
+                            enabled: getConnected() && !getUploading()
+                                     && (composeInput.text.length > 0 || getPendingAttachment().length > 0)
                             contentItem: Text {
                                 text: parent.text
                                 color: parent.enabled ? theme.text : theme.textMuted
@@ -613,7 +963,7 @@ Rectangle {
                         }
 
                         Button {
-                            text: "⟳"
+                            text: "\u27F3"
                             font.pixelSize: 16
                             ToolTip.visible: hovered
                             ToolTip.text: "Reset checkpoint"
@@ -629,7 +979,9 @@ Rectangle {
                                 implicitWidth: 36
                                 implicitHeight: 36
                             }
-                            onClicked: backend.resetCheckpoint()
+                            onClicked: {
+                                if (!basecampMode && api) api.resetCheckpoint()
+                            }
                         }
                     }
                 }
@@ -650,7 +1002,7 @@ Rectangle {
                         anchors.left: parent.left
                         anchors.leftMargin: 14
                         anchors.verticalCenter: parent.verticalCenter
-                        text: backend.status
+                        text: getStatus()
                         color: theme.textPlace
                         font.pixelSize: 11
                     }
@@ -667,7 +1019,7 @@ Rectangle {
 
         Rectangle {
             anchors.centerIn: parent
-            width: 420; height: 340
+            width: 420; height: 280
             color: theme.bgSecondary
             border.color: theme.border
             border.width: 1
@@ -694,11 +1046,11 @@ Rectangle {
                 TextField {
                     id: dataDirInput
                     Layout.fillWidth: true
-                    placeholderText: "Data directory…"
+                    placeholderText: "Data directory\u2026"
                     placeholderTextColor: theme.textPlace
                     font.pixelSize: theme.fontPrimary
                     color: theme.text
-                    text: backend.dataDir
+                    text: getDataDir()
                     background: Rectangle {
                         color: theme.bgInset
                         border.color: dataDirInput.activeFocus ? theme.accent : theme.border
@@ -713,25 +1065,10 @@ Rectangle {
                     placeholderTextColor: theme.textPlace
                     font.pixelSize: theme.fontPrimary
                     color: theme.text
-                    text: backend.nodeUrl
+                    text: getNodeUrl()
                     background: Rectangle {
                         color: theme.bgInset
                         border.color: nodeInput.activeFocus ? theme.accent : theme.border
-                        border.width: 1
-                        radius: 6
-                    }
-                }
-                TextField {
-                    id: storageInput
-                    Layout.fillWidth: true
-                    placeholderText: "Storage URL (e.g. http://localhost:8090)"
-                    placeholderTextColor: theme.textPlace
-                    font.pixelSize: theme.fontPrimary
-                    color: theme.text
-                    text: backend.storageUrl
-                    background: Rectangle {
-                        color: theme.bgInset
-                        border.color: storageInput.activeFocus ? theme.accent : theme.border
                         border.width: 1
                         radius: 6
                     }
@@ -755,43 +1092,24 @@ Rectangle {
                         radius: 6
                         implicitHeight: 40
                     }
-                    onClicked: {
-                        backend.setDataDir(dataDirInput.text)
-                        backend.setNodeUrl(nodeInput.text)
-                        if (storageInput.text.length > 0)
-                            backend.setStorageUrl(storageInput.text)
-                        backend.connectToNode()
-                    }
+                    onClicked: doConnect()
                 }
             }
         }
     }
 
-    // ── Functions ────────────────────────────────────────────────────────────
-    function doSubscribe() {
-        var ch = subInput.text.trim()
-        if (ch.length > 0) {
-            backend.subscribe(ch)
-            subInput.text = ""
-        }
-    }
-
-    function doPublish() {
-        var msg = composeInput.text.trim()
-        var hasAttachment = (backend.pendingAttachmentPreview || "").length > 0
-        if (msg.length === 0 && !hasAttachment) return
-        if (hasAttachment) {
-            backend.publishWithAttachment(msg)
-        } else {
-            backend.publish(msg)
-        }
-        composeInput.text = ""
-    }
-
+    // ── Standalone mode connections ──────────────────────────────────────────
     Connections {
-        target: backend
+        target: basecampMode ? null : api
         function onMessagesChanged() {
             messageList.positionViewAtEnd()
         }
+        function onChannelListChanged() {
+            channelListView.model = api ? api.channelList : []
+        }
+    }
+
+    Component.onDestruction: {
+        if (pollTimerId >= 0) clearInterval(pollTimerId)
     }
 }

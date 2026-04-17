@@ -2,9 +2,25 @@
   "name": "yolo_board",
   "version": "0.1.0",
   "description": "Censorship-resistant bulletin board on the Logos blockchain",
-  "type": "ui",
+  "type": "ui_qml",
+  "category": "social",
   "main": "yolo_board_plugin",
-  "dependencies": ["liblogos_zone_sequencer_module", "storage_module"],
+  "view": "qml/Main.qml",
   "icon": "yolo.png",
-  "category": "social"
+  "dependencies": ["liblogos_zone_sequencer_module", "storage_module"],
+  "nix": {
+    "packages": {
+      "runtime": ["qt6.qtdeclarative", "qt6.qtwayland", "openssl"]
+    },
+    "cmake": {
+      "find_packages": ["OpenSSL"],
+      "extra_link_libraries": ["OpenSSL::Crypto"]
+    },
+    "external_libraries": [
+      {
+        "name": "zone_sequencer_rs",
+        "vendor_path": "lib"
+      }
+    ]
+  }
 }

@@ -1,4 +1,4 @@
-#include "yolo_board_plugin.h"
+#include "YoloBoardPlugin.h"
 #include "YoloBoardBackend.h"
 
 #include <QQuickWidget>
@@ -9,14 +9,23 @@
 YoloBoardPlugin::YoloBoardPlugin(QObject* parent) : QObject(parent) {}
 YoloBoardPlugin::~YoloBoardPlugin() = default;
 
-QWidget* YoloBoardPlugin::createWidget(LogosAPI* logosAPI) {
-    m_backend = new YoloBoardBackend(logosAPI);
+void YoloBoardPlugin::initLogos(LogosAPI* api) {
+    if (m_backend) return;
+    logosAPI = api;
+    m_backend = new YoloBoardBackend(api, this);
+    qDebug() << "YoloBoardPlugin: backend initialized via initLogos";
+}
+
+QWidget* YoloBoardPlugin::createWidget(LogosAPI* api) {
+    if (!m_backend) {
+        if (api) logosAPI = api;
+        m_backend = new YoloBoardBackend(logosAPI, this);
+    }
 
     auto* view = new QQuickWidget();
     view->engine()->rootContext()->setContextProperty("backend", m_backend);
     view->setResizeMode(QQuickWidget::SizeRootObjectToView);
 
-    // Allow overriding QML path at runtime for development
     const char* qmlPathEnv = std::getenv("QML_PATH");
     if (qmlPathEnv) {
         view->setSource(QUrl::fromLocalFile(

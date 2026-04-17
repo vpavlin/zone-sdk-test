@@ -4,6 +4,9 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/e9f00bd893984bc8ce46c895c3bf7cac95331127";
     nixpkgs-rust.url = "github:NixOS/nixpkgs/bfc1b8a4574108ceef22f02bafcf6611380c100d";
+    logos-module-builder = {
+      url = "github:logos-co/logos-module-builder";
+    };
     logos-cpp-sdk = {
       url = "github:logos-co/logos-cpp-sdk/4b66dac015e4b977d33cfae80a4c8e1d518679f3";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -28,7 +31,8 @@
     };
   };
 
-  outputs = { self, nixpkgs, nixpkgs-rust, logos-cpp-sdk, logos-liblogos, logos-package,
+  outputs = { self, nixpkgs, nixpkgs-rust, logos-module-builder,
+              logos-cpp-sdk, logos-liblogos, logos-package,
               zone-sequencer-module, zone-sequencer-rs, ... }:
     let
       systems = [ "x86_64-linux" ];
@@ -49,7 +53,6 @@
             pkgs.qt6.qtdeclarative
           ];
 
-          # Build the Rust C FFI library
           circuits = builtins.fetchTarball {
             url = "https://github.com/logos-blockchain/logos-blockchain/releases/download/0.2.1/logos-blockchain-circuits-v0.4.1-linux-x86_64.tar.gz";
             sha256 = "1xnhl4y2zpxvcgm0xx95v0v6av2amp5isfi0s92cxrjg7dqmp5z8";
@@ -79,7 +82,6 @@
             '';
           };
 
-          # Common cmake flags
           cmakeFlagsCommon = [
             "-DLOGOS_CPP_SDK_ROOT=${logosSdk}"
             "-DZONE_SEQUENCER_RS_LIB_DIR=${rustLib}/lib"
@@ -105,6 +107,8 @@
               cp libyolo_board_plugin.so $out/lib/yolo_board.so
               cp ${rustLib}/lib/libzone_sequencer_rs.so $out/lib/
               cp $src/resources/Yolo.png $out/lib/yolo.png
+              mkdir -p $out/qml
+              cp $src/src/qml/Main.qml $out/qml/
               runHook postInstall
             '';
             postFixup = ''
@@ -134,10 +138,6 @@
               cp ${rustLib}/lib/libzone_sequencer_rs.so $out/lib/
               runHook postInstall
             '';
-            # Inject LD_LIBRARY_PATH into the Qt wrapper so that transitive
-            # OpenSSL libs (libssl pulled by ngtcp2 etc.) are always found.
-            # Do NOT patchelf the wrapped binary — CMake generates a complete
-            # RUNPATH covering all Qt/system deps automatically.
             preFixup = ''
               qtWrapperArgs+=(
                 --prefix LD_LIBRARY_PATH : "${pkgs.openssl.out}/lib"
@@ -187,6 +187,7 @@
             cp ${plugin}/lib/yolo_board.so variant-files/
             cp ${plugin}/lib/libzone_sequencer_rs.so variant-files/
             cp ${plugin}/lib/yolo.png variant-files/
+            cp ${plugin}/qml/Main.qml variant-files/
             lgx add yolo-board.lgx --variant linux-x86_64-dev --files ./variant-files --main yolo_board.so -y
             lgx add yolo-board.lgx --variant linux-amd64-dev  --files ./variant-files --main yolo_board.so -y
             lgx verify yolo-board.lgx
@@ -201,7 +202,6 @@
         }
       );
 
-      # nix run . — launches standalone app
       apps = nixpkgs.lib.genAttrs [ "x86_64-linux" ] (system: {
         default = {
           type = "app";
