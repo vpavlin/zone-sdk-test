@@ -5,6 +5,6 @@
   "type": "ui",
   "main": "yolo_board_plugin",
   "dependencies": ["liblogos_zone_sequencer_module", "storage_module"],
-  "icon": "",
+  "icon": "yolo.png",
   "category": "social"
 }

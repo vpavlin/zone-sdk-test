@@ -104,6 +104,7 @@
               mkdir -p $out/lib
               cp libyolo_board_plugin.so $out/lib/yolo_board.so
               cp ${rustLib}/lib/libzone_sequencer_rs.so $out/lib/
+              cp ${src}/resources/Yolo.png $out/lib/yolo.png
               runHook postInstall
             '';
             postFixup = ''
@@ -185,6 +186,7 @@
             mkdir -p variant-files
             cp ${plugin}/lib/yolo_board.so variant-files/
             cp ${plugin}/lib/libzone_sequencer_rs.so variant-files/
+            cp ${plugin}/lib/yolo.png variant-files/
             lgx add yolo-board.lgx --variant linux-x86_64-dev --files ./variant-files --main yolo_board.so -y
             lgx add yolo-board.lgx --variant linux-amd64-dev  --files ./variant-files --main yolo_board.so -y
             lgx verify yolo-board.lgx
