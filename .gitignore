@@ -23,3 +23,5 @@ cache/
 *.log
 *.tar.gz
 channel.id
+target/
+sequencer.checkpoint*

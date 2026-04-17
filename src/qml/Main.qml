@@ -6,91 +6,122 @@ Rectangle {
     id: root
     width: 900
     height: 600
-    color: "#1a1a2e"
+    color: theme.bg
 
-    // ── Colours ───────────────────────────────────────────────────────────────
-    readonly property color bgColor:       "#1a1a2e"
-    readonly property color panelColor:    "#16213e"
-    readonly property color accentColor:   "#0f3460"
-    readonly property color highlightColor:"#e94560"
-    readonly property color textColor:     "#eaeaea"
-    readonly property color mutedColor:    "#888"
-    readonly property color ownMsgColor:   "#c8f7c5"
-    readonly property color otherMsgColor: "#eaeaea"
-    readonly property color pendingColor:  "#888"
-    readonly property color failedColor:   "#ff4444"
-    readonly property int   baseFontPx:    13
+    // ── Basecamp Dark Theme ──────────────────────────────────────────────────
+    QtObject {
+        id: theme
+        readonly property color bg:          "#171717"
+        readonly property color bgSecondary: "#262626"
+        readonly property color bgElevated:  "#0E121B"
+        readonly property color bgInset:     "#141414"
+        readonly property color surface:     "#343434"
+        readonly property color border:      "#434343"
+        readonly property color borderSub:   "#333333"
+
+        readonly property color text:        "#FFFFFF"
+        readonly property color textSec:     "#A4A4A4"
+        readonly property color textMuted:   "#969696"
+        readonly property color textPlace:   "#717784"
+
+        readonly property color accent:      "#ED7B58"
+        readonly property color accentHover: "#FF6F42"
+        readonly property color success:     "#49F563"
+        readonly property color error:       "#FB3748"
+        readonly property color warning:     "#FEBC2E"
+        readonly property color info:        "#4A90E2"
+        readonly property color notify:      "#FB3748"
+
+        readonly property int fontPrimary:   14
+        readonly property int fontSecondary: 12
+    }
 
     property bool showSetup: backend.ownChannelId === ""
 
-    // ── Header ────────────────────────────────────────────────────────────────
+    // ── Main Layout ──────────────────────────────────────────────────────────
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
+        // ── Header bar ───────────────────────────────────────────────────────
         Rectangle {
             Layout.fillWidth: true
-            height: 40
-            color: root.accentColor
+            height: 44
+            color: theme.bgElevated
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 12
-                anchors.rightMargin: 12
-                spacing: 8
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                spacing: 10
 
                 Rectangle {
                     width: 8; height: 8; radius: 4
-                    color: backend.connected ? "#44ff44" : "#ff4444"
+                    color: backend.connected ? theme.success : theme.error
                 }
                 Text {
                     text: "Yolo Board"
-                    color: root.textColor
-                    font.pixelSize: 15
-                    font.bold: true
+                    color: theme.text
+                    font.pixelSize: 16
+                    font.weight: Font.Bold
                 }
                 Item { Layout.fillWidth: true }
                 Text {
                     text: backend.ownChannelId.length > 0
-                          ? "Channel: " + backend.channelDisplayName(backend.ownChannelId)
-                          : "Not configured"
-                    color: root.mutedColor
-                    font.pixelSize: 11
+                          ? backend.channelDisplayName(backend.ownChannelId)
+                          : ""
+                    color: theme.textMuted
+                    font.pixelSize: theme.fontSecondary
+                }
+                Rectangle {
+                    width: 1; height: 20
+                    color: theme.border
+                    visible: backend.nodeUrl.length > 0
                 }
                 Text {
                     text: backend.nodeUrl
-                    color: root.mutedColor
-                    font.pixelSize: 11
+                    color: theme.textMuted
+                    font.pixelSize: theme.fontSecondary
+                    visible: backend.nodeUrl.length > 0
                 }
+            }
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width; height: 1
+                color: theme.borderSub
             }
         }
 
-        // ── Main body ─────────────────────────────────────────────────────────
+        // ── Body ─────────────────────────────────────────────────────────────
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 0
 
-            // ── Channel sidebar ───────────────────────────────────────────────
+            // ── Channel sidebar ──────────────────────────────────────────────
             Rectangle {
-                Layout.preferredWidth: 180
+                Layout.preferredWidth: 200
                 Layout.fillHeight: true
-                color: root.panelColor
+                color: theme.bgSecondary
 
                 ColumnLayout {
                     anchors.fill: parent
                     spacing: 0
 
-                    Rectangle {
+                    // Sidebar header
+                    Item {
                         Layout.fillWidth: true
-                        height: 30
-                        color: root.accentColor
+                        height: 36
                         Text {
-                            anchors.centerIn: parent
-                            text: "Channels"
-                            color: root.textColor
-                            font.pixelSize: 12
-                            font.bold: true
+                            anchors.left: parent.left
+                            anchors.leftMargin: 14
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "CHANNELS"
+                            color: theme.textMuted
+                            font.pixelSize: 11
+                            font.weight: Font.Medium
+                            font.letterSpacing: 1
                         }
                     }
 
@@ -107,98 +138,100 @@ Rectangle {
 
                             property real backfillProg: backend.backfillProgress[modelData] || -1
                             property bool backfilling: backfillProg >= 0
+                            property bool selected: index === backend.currentChannelIndex
+                            property bool hovered: chMouse.containsMouse
 
-                            // ── Channel row ───────────────────────────────
                             Rectangle {
                                 width: chDelegate.width
-                                height: 38
-                                color: index === backend.currentChannelIndex
-                                       ? root.highlightColor : "transparent"
+                                height: 36
+                                color: chDelegate.selected ? theme.surface
+                                     : chDelegate.hovered ? Qt.rgba(1,1,1,0.04)
+                                     : "transparent"
+                                radius: 4
+                                anchors.leftMargin: 4
+                                anchors.rightMargin: 4
 
                                 MouseArea {
+                                    id: chMouse
                                     anchors.fill: parent
+                                    hoverEnabled: true
                                     onClicked: backend.currentChannelIndex = index
                                 }
 
                                 RowLayout {
                                     anchors.fill: parent
-                                    anchors.leftMargin: 8
-                                    anchors.rightMargin: 6
-                                    spacing: 4
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 8
+                                    spacing: 6
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: (modelData === backend.ownChannelId ? "[you] " : "")
-                                              + backend.channelDisplayName(modelData)
-                                        color: index === backend.currentChannelIndex
-                                               ? "white" : root.textColor
-                                        font.pixelSize: 11
+                                        text: backend.channelDisplayName(modelData)
+                                        color: chDelegate.selected ? theme.text
+                                             : modelData === backend.ownChannelId ? theme.accent
+                                             : theme.textSec
+                                        font.pixelSize: theme.fontSecondary
+                                        font.weight: chDelegate.selected ? Font.Medium : Font.Normal
                                         elide: Text.ElideRight
                                     }
 
-                                    // Backfill ⟳ button
+                                    // Backfill button
                                     Rectangle {
-                                        visible: chDelegate.backfilling ||
-                                                 (index === backend.currentChannelIndex)
-                                        width: 18; height: 18; radius: 9
-                                        color: chDelegate.backfilling ? "#4488ff" : "transparent"
-                                        border.color: chDelegate.backfilling ? "transparent" : root.mutedColor
-                                        border.width: chDelegate.backfilling ? 0 : 1
+                                        visible: chDelegate.backfilling || chDelegate.selected
+                                        width: 20; height: 20; radius: 10
+                                        color: chDelegate.backfilling ? theme.info : "transparent"
+                                        border.color: chDelegate.backfilling ? "transparent" : theme.border
+                                        border.width: 1
                                         Text {
                                             anchors.centerIn: parent
                                             text: "⟳"
-                                            color: chDelegate.backfilling ? "white" : root.mutedColor
-                                            font.pixelSize: 11
+                                            color: chDelegate.backfilling ? theme.text : theme.textMuted
+                                            font.pixelSize: 12
                                         }
                                         MouseArea {
                                             anchors.fill: parent
-                                            onClicked: {
-                                                if (chDelegate.backfilling)
-                                                    backend.stopBackfill(modelData)
-                                                else
-                                                    backend.startBackfill(modelData)
-                                            }
+                                            onClicked: chDelegate.backfilling
+                                                ? backend.stopBackfill(modelData)
+                                                : backend.startBackfill(modelData)
                                         }
                                     }
 
                                     // Unread badge
                                     Rectangle {
                                         visible: (backend.unreadCounts[modelData] || 0) > 0
-                                        width: 20; height: 18; radius: 9
-                                        color: "#e94560"
+                                        width: 22; height: 18; radius: 9
+                                        color: theme.notify
                                         Text {
                                             anchors.centerIn: parent
                                             text: backend.unreadCounts[modelData] || 0
-                                            color: "white"
+                                            color: theme.text
                                             font.pixelSize: 10
-                                            font.bold: true
+                                            font.weight: Font.Bold
                                         }
                                     }
                                 }
                             }
 
-                            // ── Progress bar (visible only while backfilling) ──
+                            // Progress bar
                             Item {
                                 visible: chDelegate.backfilling
                                 width: chDelegate.width
                                 height: visible ? 14 : 0
 
-                                // Track
                                 Rectangle {
                                     anchors.left: parent.left
+                                    anchors.leftMargin: 12
                                     anchors.right: pctLabel.left
-                                    anchors.rightMargin: 3
+                                    anchors.rightMargin: 4
                                     anchors.verticalCenter: parent.verticalCenter
-                                    height: 3
-                                    color: root.accentColor
-                                    radius: 1
+                                    height: 3; radius: 2
+                                    color: theme.surface
 
-                                    // Fill
                                     Rectangle {
                                         width: chDelegate.backfillProg * parent.width
                                         height: parent.height
-                                        color: "#4488ff"
-                                        radius: 1
+                                        color: theme.accent
+                                        radius: 2
                                         Behavior on width { SmoothedAnimation { velocity: 80 } }
                                     }
                                 }
@@ -206,48 +239,74 @@ Rectangle {
                                 Text {
                                     id: pctLabel
                                     anchors.right: parent.right
-                                    anchors.rightMargin: 4
+                                    anchors.rightMargin: 8
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: Math.round(chDelegate.backfillProg * 100) + "%"
-                                    color: root.mutedColor
+                                    color: theme.textMuted
                                     font.pixelSize: 9
                                 }
                             }
                         }
                     }
 
-                    // Subscribe input
+                    // Subscribe bar
                     Rectangle {
                         Layout.fillWidth: true
-                        height: 70
-                        color: root.accentColor
+                        height: 72
+                        color: theme.bgElevated
 
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.margins: 6
-                            spacing: 4
+                            anchors.margins: 8
+                            spacing: 6
 
                             TextField {
                                 id: subInput
                                 Layout.fillWidth: true
-                                placeholderText: "Name or hex channel ID…"
-                                font.pixelSize: 10
-                                color: root.textColor
-                                background: Rectangle { color: "#0a0a1a"; radius: 3 }
+                                placeholderText: "Channel name or ID…"
+                                placeholderTextColor: theme.textPlace
+                                font.pixelSize: theme.fontSecondary
+                                color: theme.text
+                                background: Rectangle {
+                                    color: theme.bgInset
+                                    border.color: theme.borderSub
+                                    border.width: 1
+                                    radius: 4
+                                }
                                 Keys.onReturnPressed: doSubscribe()
                             }
 
                             RowLayout {
-                                spacing: 4
+                                spacing: 6
                                 Button {
                                     Layout.fillWidth: true
                                     text: "Subscribe"
-                                    font.pixelSize: 10
+                                    font.pixelSize: theme.fontSecondary
+                                    contentItem: Text {
+                                        text: parent.text
+                                        color: theme.text
+                                        font: parent.font
+                                        horizontalAlignment: Text.AlignHCenter
+                                    }
+                                    background: Rectangle {
+                                        color: parent.down ? theme.accentHover : theme.surface
+                                        radius: 4
+                                    }
                                     onClicked: doSubscribe()
                                 }
                                 Button {
                                     text: "✕"
-                                    font.pixelSize: 10
+                                    font.pixelSize: theme.fontSecondary
+                                    contentItem: Text {
+                                        text: parent.text
+                                        color: theme.textSec
+                                        font: parent.font
+                                        horizontalAlignment: Text.AlignHCenter
+                                    }
+                                    background: Rectangle {
+                                        color: parent.down ? theme.error : theme.surface
+                                        radius: 4
+                                    }
                                     enabled: backend.currentChannelIndex >= 0 &&
                                              backend.channels.length > 0
                                     onClicked: {
@@ -259,9 +318,16 @@ Rectangle {
                         }
                     }
                 }
+
+                // Right border
+                Rectangle {
+                    anchors.right: parent.right
+                    width: 1; height: parent.height
+                    color: theme.borderSub
+                }
             }
 
-            // ── Message area ──────────────────────────────────────────────────
+            // ── Message area ─────────────────────────────────────────────────
             ColumnLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -272,120 +338,162 @@ Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
-                    spacing: 2
+                    spacing: 1
                     model: backend.messages
                     verticalLayoutDirection: ListView.BottomToTop
 
                     delegate: Rectangle {
                         width: messageList.width
-                        height: msgCol.implicitHeight + 14
-                        color: "transparent"
+                        height: msgCol.implicitHeight + 16
+                        color: msgHover.containsMouse ? Qt.rgba(1,1,1,0.02) : "transparent"
 
-                        readonly property bool isOwn:    modelData.isOwn    === true
+                        readonly property bool isOwn:     modelData.isOwn    === true
                         readonly property bool isPending: modelData.pending  === true
                         readonly property bool isFailed:  modelData.failed   === true
 
+                        MouseArea {
+                            id: msgHover
+                            anchors.fill: parent
+                            hoverEnabled: true
+                        }
+
                         RowLayout {
                             anchors.fill: parent
-                            anchors.leftMargin: 10
-                            anchors.rightMargin: 10
+                            anchors.leftMargin: 14
+                            anchors.rightMargin: 14
                             anchors.topMargin: 6
-                            spacing: 6
+                            spacing: 8
 
                             Rectangle {
                                 visible: isOwn
-                                width: 3; height: parent.height
-                                color: root.highlightColor
-                                radius: 1
+                                width: 3; Layout.fillHeight: true
+                                color: theme.accent
+                                radius: 2
                             }
 
                             Column {
                                 id: msgCol
                                 Layout.fillWidth: true
-                                spacing: 2
+                                spacing: 3
 
-                                // Sender / state label
                                 Text {
                                     text: {
                                         var sender = isOwn
                                             ? "you"
-                                            : modelData.channel.substring(0, 8) + "…"
-                                        if (isPending) return sender + " [sending…]"
-                                        if (isFailed)  return sender + " [failed]"
+                                            : backend.channelDisplayName(modelData.channel || "")
+                                        if (isPending) return sender + "  ·  sending…"
+                                        if (isFailed)  return sender + "  ·  failed"
                                         return sender
                                     }
-                                    color: isFailed ? root.failedColor
-                                                    : (isOwn ? root.highlightColor : root.mutedColor)
-                                    font.pixelSize: 10
+                                    color: isFailed ? theme.error
+                                         : isOwn   ? theme.accent
+                                         :           theme.textMuted
+                                    font.pixelSize: 11
+                                    font.weight: Font.Medium
                                 }
 
-                                // Message body
                                 Text {
-                                    id: msgText
                                     width: parent.width
                                     text: modelData.data || ""
-                                    color: isFailed  ? root.failedColor
-                                         : isPending ? root.pendingColor
-                                         : isOwn     ? root.ownMsgColor
-                                         :             root.otherMsgColor
-                                    font.pixelSize: root.baseFontPx
+                                    color: isFailed  ? theme.error
+                                         : isPending ? theme.textMuted
+                                         :             theme.text
+                                    font.pixelSize: theme.fontPrimary
                                     font.strikeout: isFailed
                                     wrapMode: Text.Wrap
-                                    opacity: isPending ? 0.6 : 1.0
+                                    opacity: isPending ? 0.5 : 1.0
                                 }
 
-                                // Timestamp
                                 Text {
-                                    id: tsText
                                     visible: (modelData.timestamp || "").length > 0
                                     text: modelData.timestamp || ""
-                                    color: root.mutedColor
-                                    font.pixelSize: 9
-                                    opacity: 0.7
+                                    color: theme.textPlace
+                                    font.pixelSize: 10
                                 }
                             }
                         }
                     }
 
-                    ScrollBar.vertical: ScrollBar {}
+                    ScrollBar.vertical: ScrollBar {
+                        policy: ScrollBar.AsNeeded
+                    }
                 }
 
                 // Compose bar
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 50
-                    color: root.panelColor
+                    height: 56
+                    color: theme.bgSecondary
+
+                    Rectangle {
+                        anchors.top: parent.top
+                        width: parent.width; height: 1
+                        color: theme.borderSub
+                    }
 
                     RowLayout {
                         anchors.fill: parent
-                        anchors.leftMargin: 8
-                        anchors.rightMargin: 8
-                        anchors.topMargin: 6
-                        anchors.bottomMargin: 6
-                        spacing: 8
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 14
+                        anchors.topMargin: 8
+                        anchors.bottomMargin: 8
+                        spacing: 10
 
                         TextField {
                             id: composeInput
                             Layout.fillWidth: true
                             placeholderText: "Type a message…"
-                            font.pixelSize: root.baseFontPx
-                            color: root.textColor
-                            background: Rectangle { color: root.accentColor; radius: 4 }
+                            placeholderTextColor: theme.textPlace
+                            font.pixelSize: theme.fontPrimary
+                            color: theme.text
+                            background: Rectangle {
+                                color: theme.bgInset
+                                border.color: composeInput.activeFocus ? theme.accent : theme.borderSub
+                                border.width: 1
+                                radius: 6
+                            }
                             enabled: backend.connected
                             Keys.onReturnPressed: doPublish()
                         }
 
                         Button {
                             text: "Publish"
-                            font.pixelSize: 12
+                            font.pixelSize: theme.fontPrimary
                             enabled: backend.connected && composeInput.text.length > 0
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.enabled ? theme.text : theme.textMuted
+                                font: parent.font
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            background: Rectangle {
+                                color: parent.enabled
+                                    ? (parent.down ? theme.accentHover : theme.accent)
+                                    : theme.surface
+                                radius: 6
+                                implicitWidth: 80
+                                implicitHeight: 36
+                            }
                             onClicked: doPublish()
                         }
+
                         Button {
-                            text: "⟳ Reset"
-                            font.pixelSize: 11
+                            text: "⟳"
+                            font.pixelSize: 16
                             ToolTip.visible: hovered
-                            ToolTip.text: "Clear stale checkpoint if Publish is stuck"
+                            ToolTip.text: "Reset checkpoint"
+                            contentItem: Text {
+                                text: parent.text
+                                color: theme.textMuted
+                                font: parent.font
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            background: Rectangle {
+                                color: parent.down ? theme.surface : "transparent"
+                                radius: 6
+                                implicitWidth: 36
+                                implicitHeight: 36
+                            }
                             onClicked: backend.resetCheckpoint()
                         }
                     }
@@ -394,82 +502,120 @@ Rectangle {
                 // Status bar
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 22
-                    color: "#0a0a1a"
+                    height: 24
+                    color: theme.bgElevated
+
+                    Rectangle {
+                        anchors.top: parent.top
+                        width: parent.width; height: 1
+                        color: theme.borderSub
+                    }
+
                     Text {
                         anchors.left: parent.left
-                        anchors.leftMargin: 8
+                        anchors.leftMargin: 14
                         anchors.verticalCenter: parent.verticalCenter
                         text: backend.status
-                        color: root.mutedColor
-                        font.pixelSize: 10
+                        color: theme.textPlace
+                        font.pixelSize: 11
                     }
                 }
             }
         }
     }
 
-    // ── Setup dialog ──────────────────────────────────────────────────────────
+    // ── Setup dialog ─────────────────────────────────────────────────────────
     Rectangle {
         visible: root.showSetup
-        anchors.centerIn: parent
-        width: 400; height: 260
-        color: root.panelColor
-        border.color: root.accentColor
-        border.width: 1
-        radius: 6
+        anchors.fill: parent
+        color: Qt.rgba(0, 0, 0, 0.6)
 
-        ColumnLayout {
-            anchors.fill: parent
-            anchors.margins: 20
-            spacing: 12
+        Rectangle {
+            anchors.centerIn: parent
+            width: 420; height: 280
+            color: theme.bgSecondary
+            border.color: theme.border
+            border.width: 1
+            radius: 12
 
-            Text {
-                text: "Yolo Board — Configuration"
-                color: root.textColor
-                font.pixelSize: 15
-                font.bold: true
-            }
-            Text {
-                text: "Enter the path to your Zone data directory (contains sequencer.key and channel.id)."
-                color: root.mutedColor
-                font.pixelSize: 11
-                wrapMode: Text.Wrap
-                Layout.fillWidth: true
-            }
-            TextField {
-                id: dataDirInput
-                Layout.fillWidth: true
-                placeholderText: "Data directory (where sequencer.key lives)…"
-                font.pixelSize: 11
-                color: root.textColor
-                text: backend.dataDir
-                background: Rectangle { color: root.accentColor; radius: 3 }
-            }
-            TextField {
-                id: nodeInput
-                Layout.fillWidth: true
-                placeholderText: "Node URL (e.g. http://localhost:8080)"
-                font.pixelSize: 11
-                color: root.textColor
-                text: backend.nodeUrl
-                background: Rectangle { color: root.accentColor; radius: 3 }
-            }
-            Button {
-                Layout.fillWidth: true
-                text: "Connect"
-                font.pixelSize: 13
-                enabled: dataDirInput.text.length > 0
-                onClicked: {
-                    backend.setDataDir(dataDirInput.text)
-                    backend.setNodeUrl(nodeInput.text)
-                    backend.connectToNode()
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 24
+                spacing: 14
+
+                Text {
+                    text: "Yolo Board"
+                    color: theme.text
+                    font.pixelSize: 18
+                    font.weight: Font.Bold
+                }
+                Text {
+                    text: "Enter the path to your Zone data directory\n(contains sequencer.key and channel.id)"
+                    color: theme.textSec
+                    font.pixelSize: theme.fontSecondary
+                    lineHeight: 1.4
+                    Layout.fillWidth: true
+                }
+                TextField {
+                    id: dataDirInput
+                    Layout.fillWidth: true
+                    placeholderText: "Data directory…"
+                    placeholderTextColor: theme.textPlace
+                    font.pixelSize: theme.fontPrimary
+                    color: theme.text
+                    text: backend.dataDir
+                    background: Rectangle {
+                        color: theme.bgInset
+                        border.color: dataDirInput.activeFocus ? theme.accent : theme.border
+                        border.width: 1
+                        radius: 6
+                    }
+                }
+                TextField {
+                    id: nodeInput
+                    Layout.fillWidth: true
+                    placeholderText: "Node URL (e.g. http://localhost:8080)"
+                    placeholderTextColor: theme.textPlace
+                    font.pixelSize: theme.fontPrimary
+                    color: theme.text
+                    text: backend.nodeUrl
+                    background: Rectangle {
+                        color: theme.bgInset
+                        border.color: nodeInput.activeFocus ? theme.accent : theme.border
+                        border.width: 1
+                        radius: 6
+                    }
+                }
+                Button {
+                    Layout.fillWidth: true
+                    text: "Connect"
+                    font.pixelSize: theme.fontPrimary
+                    font.weight: Font.Medium
+                    enabled: dataDirInput.text.length > 0
+                    contentItem: Text {
+                        text: parent.text
+                        color: theme.text
+                        font: parent.font
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        color: parent.enabled
+                            ? (parent.down ? theme.accentHover : theme.accent)
+                            : theme.surface
+                        radius: 6
+                        implicitHeight: 40
+                    }
+                    onClicked: {
+                        backend.setDataDir(dataDirInput.text)
+                        backend.setNodeUrl(nodeInput.text)
+                        backend.connectToNode()
+                    }
                 }
             }
         }
     }
 
-    // ── Functions ─────────────────────────────────────────────────────────────
+    // ── Functions ────────────────────────────────────────────────────────────
     function doSubscribe() {
         var ch = subInput.text.trim()
         if (ch.length > 0) {
