@@ -144,15 +144,21 @@ Rectangle {
     function doFetchMedia(cid) {
         call("fetch_media", [cid])
     }
-    function resolveMedia(cid) {
-        if (mediaPaths[cid]) return mediaPaths[cid]
+    // Look up a CID. Reads mediaPaths reactively so source bindings update
+    // when the path dictionary changes. Side-effectful population happens
+    // in ensureResolved() below — never inside a binding, to avoid loops.
+    function mediaPathFor(cid) {
+        return mediaPaths[cid] || ""
+    }
+    function ensureResolved(cid) {
+        if (!cid || cid === "uploading") return
+        if (mediaPaths[cid]) return
         var p = call("resolve_media", [cid])
         if (p && p.length > 0) {
             var mp = Object.assign({}, mediaPaths)
             mp[cid] = p
             mediaPaths = mp
         }
-        return p || ""
     }
 
     Timer { id: refreshSoon; interval: 200; repeat: false; onTriggered: refresh() }
@@ -167,6 +173,13 @@ Rectangle {
 
     Component.onCompleted: {
         if (basecampMode) {
+            // Tell the module our QML dir so it can mirror images here
+            // (the host sandbox blocks file:// outside the plugin root).
+            var url = Qt.resolvedUrl(".").toString()
+            if (url.startsWith("file://")) url = url.substring(7)
+            while (url.endsWith("/")) url = url.substring(0, url.length - 1)
+            call("set_ui_dir", [url])
+
             // Load saved config to pre-populate setup fields
             var cfg = call("load_saved_config", [])
             try {
@@ -425,10 +438,14 @@ Rectangle {
                                     visible: (modelData.displayText || modelData.data || "").length > 0
                                 }
                                 Repeater {
+                                    id: mediaRepeater
                                     model: modelData.media || []
                                     delegate: Item {
-                                        required property var modelData
-                                        width: parent ? parent.width : 0
+                                        id: mediaSlot
+                                        property var entry: mediaRepeater.model[index]
+                                        property string cid: entry ? (entry.cid || "") : ""
+                                        property string resolvedPath: mediaPathFor(cid)
+                                        width: msgCol.width
                                         height: mediaImg.status === Image.Ready
                                                 ? mediaImg.paintedHeight + 8
                                                 : 40
@@ -438,15 +455,12 @@ Rectangle {
                                             fillMode: Image.PreserveAspectFit
                                             asynchronous: true
                                             cache: false
-                                            source: {
-                                                if (!modelData.cid || modelData.cid === "uploading") return ""
-                                                var p = resolveMedia(modelData.cid)
-                                                return p && p.length > 0 ? "file://" + p : ""
-                                            }
+                                            source: mediaSlot.resolvedPath.length > 0
+                                                    ? "file://" + mediaSlot.resolvedPath
+                                                    : ""
                                             visible: status === Image.Ready
                                             MouseArea {
                                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                onClicked: Qt.openUrlExternally(mediaImg.source)
                                             }
                                         }
                                         Rectangle {
@@ -455,15 +469,18 @@ Rectangle {
                                             color: theme.surface
                                             Text {
                                                 anchors.centerIn: parent
-                                                text: modelData.cid === "uploading" ? "Uploading\u2026"
+                                                text: mediaSlot.cid === "uploading" ? "Uploading\u2026"
                                                       : mediaImg.status === Image.Error ? "Image unavailable"
+                                                      : mediaSlot.resolvedPath.length === 0 ? "Fetching\u2026"
                                                       : "Loading image\u2026"
                                                 color: theme.textMuted; font.pixelSize: 11
                                             }
-                                            Component.onCompleted: {
-                                                if (modelData.cid && modelData.cid !== "uploading")
-                                                    doFetchMedia(modelData.cid)
-                                            }
+                                        }
+                                        Component.onCompleted: {
+                                            if (!cid || cid === "uploading") return
+                                            ensureResolved(cid)
+                                            if (mediaPathFor(cid).length === 0)
+                                                doFetchMedia(cid)
                                         }
                                     }
                                 }
