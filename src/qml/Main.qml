@@ -14,6 +14,7 @@ Rectangle {
     property var stateSnapshot: ({})
     property var channelList: []
     property var messagesList: []
+    property string lastMessagesJson: ""
     property var mediaPaths: ({})
     property int currentChannelIndex: 0
     property string pendingAttachment: ""
@@ -75,8 +76,26 @@ Rectangle {
         if (idx < 0 || idx >= channelList.length) idx = 0
         var chId = channelList[idx].id
         var json = call("get_messages", [chId])
+        // Skip reassign when the payload hasn't changed — otherwise the
+        // ListView resets scroll position on every poll.
+        var key = chId + "|" + json
+        if (key === lastMessagesJson) return
+        lastMessagesJson = key
         try {
-            messagesList = JSON.parse(json) || []
+            // Newest first so the default (top) scroll position shows recent.
+            // Dedupe by data: there are real on-chain duplicates from a
+            // prior upload-retry race, plus pending+confirmed both stick
+            // around briefly. Keep the first occurrence (= newest after reverse).
+            var raw = (JSON.parse(json) || []).reverse()
+            var seen = {}
+            var deduped = []
+            for (var i = 0; i < raw.length; i++) {
+                var k = raw[i].data || raw[i].id || ""
+                if (seen[k]) continue
+                seen[k] = true
+                deduped.push(raw[i])
+            }
+            messagesList = deduped
         } catch(e) { messagesList = [] }
     }
 
@@ -371,7 +390,6 @@ Rectangle {
                     Layout.fillWidth: true; Layout.fillHeight: true
                     clip: true; spacing: 1
                     model: messagesList
-                    verticalLayoutDirection: ListView.BottomToTop
 
                     DropArea {
                         anchors.fill: parent
