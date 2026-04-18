@@ -193,24 +193,37 @@ Combined with issues #14 and #15, this makes the "middleware module" pattern (UI
 2. Make `informModuleToken` reliably asynchronous — don't require the target to drain its event loop.
 3. Document that sync cross-module calls from within an IPC handler are not supported.
 
+**Workaround we landed (April 2026):** the middleware module pattern works as long as:
+1. The middleware module's CMakeLists links `liblogos_sdk.a` with `-Wl,--whole-archive` so `ModuleProxy::informModuleToken` is callable on it (issue #14).
+2. All cross-module IPC inside the middleware is dispatched on the main thread via `QTimer::singleShot(0, this, ...)`, never from `QtConcurrent::run` (issue #5).
+3. The first IPC round-trip to each dependency still pays a one-time ~20s token-exchange penalty if `--whole-archive` is missing on the *target*; otherwise it works on the first call.
+
+With those, our `yolo_board_module` middleware is fully working. The framework-level fixes are still desirable.
+
 ---
 
-### 17. `ui_qml` sandbox blocks legitimate imports
+### 17. `ui_qml` sandbox blocks legitimate imports + file:// + network
 
-**Severity:** Medium — forces awkward UX workarounds
+**Severity:** High — blocks both UX (no file picker) AND any feature that needs to display files generated outside the plugin's install directory
 
-Basecamp's `ui_qml` plugin loader restricts QML import paths to:
-- `qrc:/qt-project.org/imports`
-- `qrc:/qt/qml`
-- Plugin-local directory
+Basecamp's `ui_qml` plugin loader restricts the QML engine in three ways, all of which we hit while building media display:
 
-This blocks `QtQuick.Dialogs` (file picker), `Qt.labs.folderlistmodel`, `Qt.labs.platform`, etc. — so there's no way for a UI plugin to open a native file dialog or list local files.
+**(a) Import paths** — limited to `qrc:/qt-project.org/imports`, `qrc:/qt/qml`, and the plugin-local directory. Blocks `QtQuick.Dialogs`, `Qt.labs.folderlistmodel`, `Qt.labs.platform`, etc.
+
+**(b) `file://` is restricted to the plugin's own install directory.** At engine startup the host logs `QML allowed roots: QList("<plugin_dir>")`. Loading an `Image { source: "file:///home/user/.cache/foo.png" }` is silently rejected.
+
+**(c) Network access is disabled.** `data:image/...;base64,...` URLs go through `QNetworkAccessManager` and fail with `QML QQuickImage: Network access disabled for this QML engine` — so data: URLs are NOT a workaround.
+
+**(d) Symlinks inside the plugin dir are also rejected** if their target lies outside the allowed root — the sandbox resolves them.
 
 **Workarounds we resorted to:**
-- Drag-and-drop onto a `DropArea` (works, but not discoverable)
-- Manual path input dialog (terrible UX)
+- File picker: drag-and-drop onto a `DropArea` (works, undiscoverable) + manual path-input dialog (terrible UX)
+- Loading files generated outside the plugin dir: pass the QML's own `Qt.resolvedUrl(".")` to the backend module via `set_ui_dir()`, then have the module **copy** (not symlink) cached files into `<plugin_dir>/<subdir>/<id>` and return the path. We do this for media display in `yolo_board_module::resolve_media`.
 
-**Recommendation:** Expose a file-picker method on `LogosQmlBridge` (e.g. `logos.pickFile(filters, callback)`) that goes through the host's permission model. Or relax the import restrictions for a curated safe-list (Dialogs, FolderListModel).
+**Recommendations:**
+- Expose `logos.pickFile(filters, callback)` on `LogosQmlBridge` going through the host's permission model.
+- Allow file:// access to a curated set of standard locations (e.g. `QStandardPaths::AppDataLocation`, `QStandardPaths::CacheLocation`) so plugins don't have to mirror their cache dirs.
+- OR: register a custom `QQuickImageProvider` API on the bridge so plugins can serve images by id without going through the network or filesystem at all.
 
 ---
 
@@ -241,19 +254,55 @@ The `storageUploadDone` event DOES carry the CID, but `logos.onModuleEvent` isn'
 2. Add plain-QString wrapper methods (e.g. `manifestsJson() → QString`) to the storage module as a bridging option
 3. Land `callModuleAsync` + `onModuleEvent` so plugins can subscribe to `storageUploadDone` instead of polling
 
+**Workaround we landed (April 2026):** option (2) — `manifestsJson()`, `uploadUrlJson()`, `existsJson()`, `downloadFileJson()` wrappers were added to our storage_module fork. Each delegates to its `LogosResult`-returning sibling and serialises with a small `stdLogosResultToJson()` helper. The codegen automatically maps `std::string` ↔ `QString` for IPC, so callers receive valid JSON they can parse with `QJsonDocument`. Upload + CID retrieval + download all work end-to-end now.
+
+This pattern is now baked into our `inter-module-comm` Claude Code skill as the recommended workaround until #2 lands upstream.
+
+---
+
+### 20. `storage_module.start()` blocks ~30 s synchronously
+
+**Severity:** High — single sync call freezes both calling and called modules' main threads
+
+`StorageModuleImpl::start()` is documented as async (`emits "storageStart" event on completion`), but the underlying `storage_start` C call from libstorage actually blocks for ~27 seconds during discovery + transport bind. Symptom: caller's `storageCall("start", {})` blocks the caller's main thread for the full duration; during that window the caller can't process other incoming IPC, so its `get_state` polls back-pressure into the QML and the UI freezes.
+
+**Concrete impact:** the user sees the UI completely frozen for ~30 s on first launch, with no feedback. If they click "Publish image" during that window, the IPC times out at 20 s and the upload appears to fail silently.
+
+**Fix we landed in our fork:** wrap the actual `storage_start` call in a detached `std::thread`:
+
+```cpp
+bool StorageModuleImpl::start() {
+    if (!storageCtx) return false;
+    auto* ctx = new SimpleEventCtx(this, "storageStart");
+    auto* sctx = storageCtx;
+    std::thread([sctx, ctx]() {
+        if (storage_start(sctx, asyncDispatch, ctx) != RET_OK) delete ctx;
+    }).detach();
+    return true;   // IPC returns immediately; readiness signalled via "storageStart" event
+}
+```
+
+The caller side (`yolo_board_module`) then no longer blocks on `storageCall("start", {})`. Instead, `runUpload` retries `uploadUrlJson` every second with a `QEventLoop` micro-wait until libstorage actually completes init in the background.
+
+**Recommendations:**
+1. Apply the detached-thread fix upstream — the API contract already says the method is async.
+2. More generally: any `Q_INVOKABLE` SLOT that calls a native lib function should run that native call off the main thread when documented as async.
+3. Alternatively: make the IPC layer enforce a max-blocking-time on the called side and return a "still pending" sentinel rather than blocking the IPC reply.
+
 ---
 
 ## Summary
 
-The Basecamp module system works well architecturally. The main pain points are:
+The Basecamp module system works well architecturally. The main pain points (with current status):
 
-1. **Silent failures** — IPC calls fail silently (empty results, 20s timeouts) instead of producing clear error messages
-2. **ABI coupling at runtime** — `RTLD_GLOBAL` plugin loading means fixes to the SDK require rebuilding everything in lockstep (#15). There's no per-plugin upgrade path.
-3. **Cross-module sync IPC deadlocks** on token handshake (#16) — the middleware pattern (UI → domain_module → backing_modules) is impractical
-4. **Version coupling** — SDK version must match exactly between Basecamp and all modules, with no compatibility detection
-5. **Threading assumptions** — QRemoteObjects threading constraints are undocumented and cause subtle bugs
-6. **Codegen limitations** — line-based parser and missing provider methods create gaps between client and server interfaces
-7. **UI sandbox over-restrictive** — blocks `QtQuick.Dialogs` etc., leaving no path to native file pickers (#17)
-8. **Sync-only `LogosQmlBridge`** in current Basecamp (#18) — freezes UI for every IPC call
+1. **Silent failures** — IPC calls fail silently (empty results, 20s timeouts) instead of producing clear error messages. *Still open.*
+2. **ABI coupling at runtime** — `RTLD_GLOBAL` plugin loading means fixes to the SDK require rebuilding everything in lockstep (#15). There's no per-plugin upgrade path. *Still open.*
+3. **Cross-module sync IPC deadlocks** on token handshake (#16) — workaround: middleware module's CMakeLists must use `--whole-archive` AND every IPC call must be on the main thread (`QTimer::singleShot(0, ...)`, never `QtConcurrent`). With those two, the middleware pattern works.
+4. **Version coupling** — SDK version must match exactly between Basecamp and all modules, with no compatibility detection. *Still open.*
+5. **Threading assumptions** — `QRemoteObjects` is main-thread bound, and IPC SLOTs that call blocking native code freeze the caller's main thread. *Still open* — workarounds (#5, #20) exist but should be solved at the SDK layer.
+6. **Codegen limitations** — line-based parser and missing provider methods create gaps between client and server interfaces. *Still open.*
+7. **UI sandbox over-restrictive** — blocks `QtQuick.Dialogs` (#17a) AND blocks `file://` outside plugin dir AND blocks network so `data:` URLs fail (#17b–d). Plugins must mirror cached files into the plugin install dir. *Still open.*
+8. **Sync-only `LogosQmlBridge`** in current Basecamp (#18) — freezes UI for every IPC call. Mitigated by polling JSON-state from QML and keeping per-call latency low. *Still open.*
+9. **Native lib startup blocks IPC** (#20) — workaround: detach to `std::thread` in the module. Should be the SDK's responsibility. *Workaround landed in our storage_module fork.*
 
-All fixes are available in the forks listed in [BUILD.md](BUILD.md). For the user-facing Yolo Board, we ended up with a pragmatic architecture: pure QML plugin calling core modules directly via `callModule()`, with the zone-sequencer module extended to own file persistence (subscriptions, config) since the QML sandbox can't write files. Publishing text works end-to-end; file upload stores bytes but can't retrieve the CID due to #19.
+All fixes and workarounds are available in the forks listed in [BUILD.md](BUILD.md). Yolo Board's final architecture is the canonical "domain module" pattern: thin QML calling a single `yolo_board_module` that owns business logic and fans out to the zone-sequencer + storage modules. End-to-end publish + image upload + own-channel image display all work; cross-channel image fetch needs storage peers serving the CIDs.
