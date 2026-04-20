@@ -439,15 +439,35 @@ async fn run_channel(
     let poll_interval = Duration::from_secs(args.poll_interval_secs);
 
     loop {
+        let cursor_slot = cursor
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok())
+            .and_then(|v| v["slot"].as_u64())
+            .unwrap_or(0);
         match indexer.next_messages(cursor, args.batch_limit).await {
             Ok(poll) => {
                 let got = poll.messages.len();
+                let new_slot = serde_json::to_value(&poll.cursor)
+                    .ok()
+                    .and_then(|v| v["slot"].as_u64())
+                    .unwrap_or(0);
+                debug!(
+                    channel = %name,
+                    from = cursor_slot, to = new_slot, got,
+                    "poll",
+                );
                 if got > 0 {
-                    info!(channel = %name, count = got, "new messages");
+                    info!(channel = %name, count = got, from = cursor_slot, to = new_slot, "new messages");
                 }
                 for block in &poll.messages {
                     let raw = String::from_utf8_lossy(&block.data);
                     let msg_id = hex::encode(<[u8; 32]>::from(block.id));
+                    debug!(
+                        channel = %name,
+                        msg = %&msg_id[..16.min(msg_id.len())],
+                        preview = %raw.chars().take(120).collect::<String>(),
+                        "message data",
+                    );
                     let cids = extract_cids(&raw, args.scan_raw);
                     if !cids.is_empty() {
                         info!(
