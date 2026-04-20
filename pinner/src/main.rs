@@ -40,6 +40,11 @@ struct Args {
     #[arg(long, env = "STORAGE_URL")]
     storage_url: String,
 
+    /// REST API prefix on the storage node. Use /api/codex/v1 for older
+    /// Codex-based builds, /api/storage/v1 for newer logos-storage-nim.
+    #[arg(long, env = "STORAGE_API_PREFIX", default_value = "/api/storage/v1")]
+    api_prefix: String,
+
     /// Comma-separated channel names or 64-char hex channel IDs.
     #[arg(long, env = "CHANNELS", value_delimiter = ',', required = true)]
     channels: Vec<String>,
@@ -245,6 +250,7 @@ fn extract_cids(raw: &str, scan_raw: bool) -> Vec<Found> {
 #[derive(Clone)]
 struct Storage {
     base: String,
+    prefix: String,
     client: reqwest::Client,
     max_bytes: u64,
     fetch_timeout: Duration,
@@ -252,13 +258,24 @@ struct Storage {
 }
 
 impl Storage {
-    fn new(storage_url: &str, max_bytes: u64, fetch_timeout: Duration, verify: bool) -> Result<Self> {
+    fn new(
+        storage_url: &str,
+        api_prefix: &str,
+        max_bytes: u64,
+        fetch_timeout: Duration,
+        verify: bool,
+    ) -> Result<Self> {
         let base = storage_url.trim_end_matches('/').to_string();
+        let mut prefix = api_prefix.trim_end_matches('/').to_string();
+        if !prefix.starts_with('/') {
+            prefix = format!("/{prefix}");
+        }
         let client = reqwest::Client::builder()
             .pool_idle_timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self {
             base,
+            prefix,
             client,
             max_bytes,
             fetch_timeout,
@@ -266,11 +283,11 @@ impl Storage {
         })
     }
 
-    /// GET /api/storage/v1/data/<cid>/network/stream — streams the content
+    /// GET {prefix}/data/<cid>/network/stream — streams the content
     /// through the local storage node, which pulls it from the network and
     /// (typically) caches it locally. We discard the bytes but cap at max_bytes.
     async fn pin(&self, cid: &str) -> Result<u64> {
-        let url = format!("{}/api/storage/v1/data/{}/network/stream", self.base, cid);
+        let url = format!("{}{}/data/{}/network/stream", self.base, self.prefix, cid);
         let resp = tokio::time::timeout(
             self.fetch_timeout,
             self.client.get(&url).send(),
@@ -313,7 +330,7 @@ impl Storage {
     /// Ask the local node for the manifest. If this returns 200 with JSON, the
     /// CID is known locally and presumably persisted.
     async fn verify_manifest(&self, cid: &str) -> Result<serde_json::Value> {
-        let url = format!("{}/api/storage/v1/data/{}/network/manifest", self.base, cid);
+        let url = format!("{}{}/data/{}/network/manifest", self.base, self.prefix, cid);
         let resp = self.client.get(&url).send().await?;
         if !resp.status().is_success() {
             return Err(anyhow!("manifest HTTP {}", resp.status()));
@@ -321,9 +338,9 @@ impl Storage {
         Ok(resp.json().await?)
     }
 
-    /// GET /api/storage/v1/debug/info — peer id, listen addrs, announce addrs, SPR.
+    /// GET {prefix}/debug/info — peer id, listen addrs, announce addrs, SPR.
     async fn debug_info(&self) -> Result<DebugInfo> {
-        let url = format!("{}/api/storage/v1/debug/info", self.base);
+        let url = format!("{}{}/debug/info", self.base, self.prefix);
         let resp = self.client.get(&url).send().await?;
         if !resp.status().is_success() {
             return Err(anyhow!("debug/info HTTP {}", resp.status()));
@@ -517,6 +534,7 @@ async fn main() -> Result<()> {
 
     let storage = Storage::new(
         &args.storage_url,
+        &args.api_prefix,
         args.max_bytes,
         Duration::from_secs(args.fetch_timeout_secs),
         args.verify,
