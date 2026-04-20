@@ -591,6 +591,14 @@ Rectangle {
                             background: Rectangle { color: parent.down ? theme.surface : "transparent"; radius: 6; implicitWidth: 36; implicitHeight: 36 }
                             onClicked: doResetCheckpoint()
                         }
+                        Button {
+                            text: "\u26D3"; font.pixelSize: 16
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Connect storage peer"
+                            contentItem: Text { text: parent.text; color: theme.textMuted; font: parent.font; horizontalAlignment: Text.AlignHCenter }
+                            background: Rectangle { color: parent.down ? theme.surface : "transparent"; radius: 6; implicitWidth: 36; implicitHeight: 36 }
+                            onClicked: connectPeerDialog.open()
+                        }
                     }
                 }
 
@@ -688,5 +696,79 @@ Rectangle {
             attachPathInput.text = ""
         }
         onRejected: attachPathInput.text = ""
+    }
+
+    Dialog {
+        id: connectPeerDialog
+        title: "Connect Storage Peer"
+        anchors.centerIn: parent
+        width: 520; modal: true
+        standardButtons: Dialog.Close
+        background: Rectangle { color: theme.bgSecondary; border.color: theme.border; border.width: 1; radius: 12 }
+        property string lastResult: ""
+        header: Item {
+            height: 40
+            Text {
+                anchors.left: parent.left; anchors.leftMargin: 24
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Connect Storage Peer"; color: theme.text
+                font.pixelSize: 16; font.weight: Font.Bold
+            }
+        }
+        contentItem: ColumnLayout {
+            spacing: 10
+            Text {
+                text: "Dial a public storage node so your CIDs can propagate even when you're behind NAT. Paste the peer id and (optionally) one or more multiaddrs."
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                color: theme.textSec
+                font.pixelSize: theme.fontSecondary
+            }
+            Text { text: "Peer id"; color: theme.textMuted; font.pixelSize: theme.fontSecondary }
+            TextField {
+                id: peerIdInput
+                Layout.fillWidth: true
+                placeholderText: "16Uiu2HAm\u2026"
+                placeholderTextColor: theme.textPlace
+                font.pixelSize: theme.fontPrimary; color: theme.text
+                background: Rectangle { color: theme.bgInset; border.color: peerIdInput.activeFocus ? theme.accent : theme.border; border.width: 1; radius: 6 }
+            }
+            Text { text: "Multiaddrs (comma-separated, optional)"; color: theme.textMuted; font.pixelSize: theme.fontSecondary }
+            TextField {
+                id: peerAddrsInput
+                Layout.fillWidth: true
+                placeholderText: "/ip4/1.2.3.4/tcp/4001, \u2026"
+                placeholderTextColor: theme.textPlace
+                font.pixelSize: theme.fontPrimary; color: theme.text
+                background: Rectangle { color: theme.bgInset; border.color: peerAddrsInput.activeFocus ? theme.accent : theme.border; border.width: 1; radius: 6 }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Button {
+                    text: "Connect"
+                    font.pixelSize: theme.fontPrimary
+                    enabled: peerIdInput.text.trim().length > 0
+                    contentItem: Text { text: parent.text; color: parent.enabled ? theme.text : theme.textMuted; font: parent.font; horizontalAlignment: Text.AlignHCenter }
+                    background: Rectangle {
+                        color: parent.enabled ? (parent.down ? theme.accentHover : theme.accent) : theme.surface
+                        radius: 6; implicitWidth: 100; implicitHeight: 32
+                    }
+                    onClicked: {
+                        var r = call("connect_storage_peer",
+                                     [peerIdInput.text.trim(), peerAddrsInput.text.trim()])
+                        connectPeerDialog.lastResult = r || "(no response)"
+                    }
+                }
+                Text {
+                    text: connectPeerDialog.lastResult
+                    color: theme.textSec
+                    font.pixelSize: theme.fontSecondary
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                }
+            }
+        }
+        onClosed: { peerIdInput.text = ""; peerAddrsInput.text = ""; lastResult = "" }
     }
 }
