@@ -703,9 +703,14 @@ Rectangle {
         title: "Connect Storage Peer"
         anchors.centerIn: parent
         width: 520; modal: true
-        standardButtons: Dialog.Close
+        padding: 20
         background: Rectangle { color: theme.bgSecondary; border.color: theme.border; border.width: 1; radius: 12 }
         property string lastResult: ""
+        onAboutToShow: {
+            peerIdInput.text = stateSnapshot.savedPeerId || ""
+            peerAddrsInput.text = stateSnapshot.savedPeerAddrs || ""
+            lastResult = ""
+        }
         header: Item {
             height: 40
             Text {
@@ -742,9 +747,30 @@ Rectangle {
                 font.pixelSize: theme.fontPrimary; color: theme.text
                 background: Rectangle { color: theme.bgInset; border.color: peerAddrsInput.activeFocus ? theme.accent : theme.border; border.width: 1; radius: 6 }
             }
+            Text {
+                text: connectPeerDialog.lastResult
+                visible: connectPeerDialog.lastResult.length > 0
+                color: theme.textSec
+                font.pixelSize: theme.fontSecondary
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                Layout.topMargin: 4
+            }
+            Item { Layout.fillHeight: true; Layout.minimumHeight: 8 }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Close"
+                    font.pixelSize: theme.fontPrimary
+                    contentItem: Text { text: parent.text; color: theme.text; font: parent.font; horizontalAlignment: Text.AlignHCenter }
+                    background: Rectangle {
+                        color: parent.down ? theme.border : theme.surface
+                        radius: 6; implicitWidth: 80; implicitHeight: 34
+                    }
+                    onClicked: connectPeerDialog.close()
+                }
                 Button {
                     text: "Connect"
                     font.pixelSize: theme.fontPrimary
@@ -752,7 +778,7 @@ Rectangle {
                     contentItem: Text { text: parent.text; color: parent.enabled ? theme.text : theme.textMuted; font: parent.font; horizontalAlignment: Text.AlignHCenter }
                     background: Rectangle {
                         color: parent.enabled ? (parent.down ? theme.accentHover : theme.accent) : theme.surface
-                        radius: 6; implicitWidth: 100; implicitHeight: 32
+                        radius: 6; implicitWidth: 100; implicitHeight: 34
                     }
                     onClicked: {
                         var r = call("connect_storage_peer",
@@ -760,15 +786,8 @@ Rectangle {
                         connectPeerDialog.lastResult = r || "(no response)"
                     }
                 }
-                Text {
-                    text: connectPeerDialog.lastResult
-                    color: theme.textSec
-                    font.pixelSize: theme.fontSecondary
-                    Layout.fillWidth: true
-                    elide: Text.ElideRight
-                }
             }
         }
-        onClosed: { peerIdInput.text = ""; peerAddrsInput.text = ""; lastResult = "" }
+        onClosed: { lastResult = "" }
     }
 }
