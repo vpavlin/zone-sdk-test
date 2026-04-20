@@ -12,7 +12,9 @@ use clap::Parser;
 use futures_util::StreamExt;
 use lb_common_http_client::CommonHttpClient;
 use lb_core::mantle::ops::channel::ChannelId;
+use lb_core::mantle::ops::Op;
 use logos_blockchain_zone_sdk::indexer::{Cursor, ZoneIndexer};
+use logos_blockchain_zone_sdk::ZoneBlock;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::Url;
@@ -83,6 +85,13 @@ struct Args {
     /// Messages per poll batch.
     #[arg(long, default_value_t = 100)]
     batch_limit: usize,
+
+    /// Read pre-LIB (unfinalized) blocks. Bypasses the zone-sdk indexer and
+    /// scans directly up to the chain tip. Messages surface within seconds
+    /// instead of minutes, at the cost of occasionally pinning a CID whose
+    /// inscription later gets reorg'd (harmless: storage is kept regardless).
+    #[arg(long, env = "UNFINALIZED")]
+    unfinalized: bool,
 }
 
 // ── YOLO Board message payload schema ─────────────────────────────────────────
@@ -402,6 +411,81 @@ async fn print_storage_identity(storage: &Storage) {
     );
 }
 
+// ── Unfinalized scanner ──────────────────────────────────────────────────────
+//
+// Mirrors what ZoneIndexer::next_messages does but reads up to the chain tip
+// instead of LIB. Lets the pinner react within seconds rather than minutes at
+// the cost of occasionally pinning a CID from a reorg'd block.
+
+struct ScanOutcome {
+    messages: Vec<ZoneBlock>,
+    cursor: Cursor,
+}
+
+async fn scan_to_tip(
+    http: &CommonHttpClient,
+    node_url: &Url,
+    channel_id: ChannelId,
+    cursor: Option<Cursor>,
+    limit: usize,
+) -> anyhow::Result<ScanOutcome> {
+    const BATCH: u64 = 100;
+    let info = http.consensus_info(node_url.clone()).await
+        .map_err(|e| anyhow!("consensus_info: {e:?}"))?;
+    let tip_slot: u64 = info.slot.into();
+
+    let start_slot = cursor
+        .as_ref()
+        .and_then(|c| serde_json::to_value(c).ok())
+        .and_then(|v| v["slot"].as_u64())
+        .map(|s| s.saturating_add(1))
+        .unwrap_or(0);
+
+    let mut current = start_slot;
+    let mut out: Vec<ZoneBlock> = Vec::new();
+    let mut last_slot = start_slot.saturating_sub(1);
+
+    while current <= tip_slot && out.len() < limit {
+        let end = (current + BATCH - 1).min(tip_slot);
+        let blocks = http.get_blocks(node_url.clone(), current, end).await
+            .map_err(|e| anyhow!("get_blocks: {e:?}"))?;
+        for block in blocks {
+            let block_slot: u64 = block.header.slot.into();
+            for tx in &block.transactions {
+                for op in &tx.mantle_tx.ops {
+                    if let Op::ChannelInscribe(inscribe) = op {
+                        if inscribe.channel_id == channel_id {
+                            out.push(ZoneBlock {
+                                id: inscribe.id(),
+                                data: inscribe.inscription.clone(),
+                            });
+                            last_slot = block_slot;
+                            if out.len() >= limit {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if out.len() >= limit { break; }
+            }
+            if out.len() >= limit { break; }
+        }
+        current = end + 1;
+        if out.is_empty() {
+            // no matches in this batch — advance cursor to end so next poll
+            // doesn't rescan the same range
+            last_slot = end;
+        }
+    }
+
+    let new_cursor: Cursor = serde_json::from_str(&format!(
+        r#"{{"slot":{last_slot},"last_id":null}}"#
+    ))
+    .map_err(|e| anyhow!("build cursor: {e}"))?;
+
+    Ok(ScanOutcome { messages: out, cursor: new_cursor })
+}
+
 // ── Per-channel loop ──────────────────────────────────────────────────────────
 
 async fn run_channel(
@@ -444,7 +528,18 @@ async fn run_channel(
             .and_then(|c| serde_json::to_value(c).ok())
             .and_then(|v| v["slot"].as_u64())
             .unwrap_or(0);
-        match indexer.next_messages(cursor, args.batch_limit).await {
+
+        let scan_result: anyhow::Result<ScanOutcome> = if args.unfinalized {
+            scan_to_tip(&http, &node_url, channel_id, cursor, args.batch_limit).await
+        } else {
+            indexer
+                .next_messages(cursor, args.batch_limit)
+                .await
+                .map(|p| ScanOutcome { messages: p.messages, cursor: p.cursor })
+                .map_err(|e| anyhow!("next_messages: {e:?}"))
+        };
+
+        match scan_result {
             Ok(poll) => {
                 let got = poll.messages.len();
                 let new_slot = serde_json::to_value(&poll.cursor)
