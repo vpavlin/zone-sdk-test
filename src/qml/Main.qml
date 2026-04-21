@@ -28,6 +28,8 @@ Rectangle {
     readonly property string dataDir: stateSnapshot.dataDir || ""
     readonly property bool isUploading: stateSnapshot.uploading === true
     readonly property bool storageIsReady: stateSnapshot.storageReady === true
+    readonly property bool sequencerStarting: stateSnapshot.sequencerStarting === true
+    readonly property bool storageStarting:   stateSnapshot.storageStarting === true
     readonly property var backfillProgressMap: stateSnapshot.backfillProgress || ({})
 
     property bool showSetup: ownChannelId === ""
@@ -220,12 +222,31 @@ Rectangle {
                 anchors.fill: parent
                 anchors.leftMargin: 16; anchors.rightMargin: 16; spacing: 10
                 Text {
+                    id: seqIcon
                     text: "\u2B21"; font.pixelSize: 16
                     color: isConnected ? theme.accent : theme.textPlace
+                    ToolTip.visible: hovered ?? false
+                    ToolTip.text: isConnected ? "Sequencer connected" : (sequencerStarting ? "Sequencer starting…" : "Sequencer disconnected")
+                    // Fade between grey and orange while starting.
+                    SequentialAnimation on color {
+                        loops: Animation.Infinite
+                        running: sequencerStarting && !isConnected
+                        ColorAnimation { from: theme.textPlace; to: theme.accent; duration: 700 }
+                        ColorAnimation { from: theme.accent;    to: theme.textPlace; duration: 700 }
+                    }
                 }
                 Text {
+                    id: storageIcon
                     text: "\u25A4"; font.pixelSize: 14
                     color: storageIsReady ? theme.accent : theme.textPlace
+                    ToolTip.visible: hovered ?? false
+                    ToolTip.text: storageIsReady ? "Storage ready" : (storageStarting ? "Storage starting…" : "Storage offline")
+                    SequentialAnimation on color {
+                        loops: Animation.Infinite
+                        running: storageStarting && !storageIsReady
+                        ColorAnimation { from: theme.textPlace; to: theme.accent; duration: 700 }
+                        ColorAnimation { from: theme.accent;    to: theme.textPlace; duration: 700 }
+                    }
                 }
                 Text {
                     text: "Yolo Board"; color: theme.text
