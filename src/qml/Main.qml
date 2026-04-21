@@ -44,8 +44,8 @@ Rectangle {
         if (storageListenAddrs.length > 0) lines.push("listen: " + storageListenAddrs.join("\n        "))
         if (storageAnnounceAddrs.length > 0) lines.push("announce: " + storageAnnounceAddrs.join("\n          "))
         if (storageSpr.length > 0) {
-            var short = storageSpr.length > 60 ? (storageSpr.substring(0, 28) + "\u2026" + storageSpr.substring(storageSpr.length - 28)) : storageSpr
-            lines.push("spr: " + short)
+            var sprShort = storageSpr.length > 60 ? (storageSpr.substring(0, 28) + "\u2026" + storageSpr.substring(storageSpr.length - 28)) : storageSpr
+            lines.push("spr: " + sprShort)
         }
         return lines.length > 0 ? lines.join("\n") : "Storage ready"
     }
