@@ -30,6 +30,25 @@ Rectangle {
     readonly property bool storageIsReady: stateSnapshot.storageReady === true
     readonly property bool sequencerStarting: stateSnapshot.sequencerStarting === true
     readonly property bool storageStarting:   stateSnapshot.storageStarting === true
+    readonly property string storagePeerId:          stateSnapshot.storagePeerId || ""
+    readonly property string storageSpr:             stateSnapshot.storageSpr || ""
+    readonly property var    storageListenAddrs:     stateSnapshot.storageListenAddrs   || []
+    readonly property var    storageAnnounceAddrs:   stateSnapshot.storageAnnounceAddrs || []
+
+    function storageTooltip() {
+        if (!storageIsReady) {
+            return storageStarting ? "Storage starting\u2026" : "Storage offline"
+        }
+        var lines = []
+        if (storagePeerId.length > 0) lines.push("peer id: " + storagePeerId)
+        if (storageListenAddrs.length > 0) lines.push("listen: " + storageListenAddrs.join("\n        "))
+        if (storageAnnounceAddrs.length > 0) lines.push("announce: " + storageAnnounceAddrs.join("\n          "))
+        if (storageSpr.length > 0) {
+            var short = storageSpr.length > 60 ? (storageSpr.substring(0, 28) + "\u2026" + storageSpr.substring(storageSpr.length - 28)) : storageSpr
+            lines.push("spr: " + short)
+        }
+        return lines.length > 0 ? lines.join("\n") : "Storage ready"
+    }
     readonly property var backfillProgressMap: stateSnapshot.backfillProgress || ({})
 
     property bool showSetup: ownChannelId === ""
@@ -235,17 +254,31 @@ Rectangle {
                         ColorAnimation { from: theme.accent;    to: theme.textPlace; duration: 700 }
                     }
                 }
-                Text {
-                    id: storageIcon
-                    text: "\u25A4"; font.pixelSize: 14
-                    color: storageIsReady ? theme.accent : theme.textPlace
-                    ToolTip.visible: hovered ?? false
-                    ToolTip.text: storageIsReady ? "Storage ready" : (storageStarting ? "Storage starting…" : "Storage offline")
-                    SequentialAnimation on color {
-                        loops: Animation.Infinite
-                        running: storageStarting && !storageIsReady
-                        ColorAnimation { from: theme.textPlace; to: theme.accent; duration: 700 }
-                        ColorAnimation { from: theme.accent;    to: theme.textPlace; duration: 700 }
+                Item {
+                    implicitWidth: storageIcon.implicitWidth
+                    implicitHeight: storageIcon.implicitHeight
+                    Text {
+                        id: storageIcon
+                        text: "\u25A4"; font.pixelSize: 14
+                        color: storageIsReady ? theme.accent : theme.textPlace
+                        SequentialAnimation on color {
+                            loops: Animation.Infinite
+                            running: storageStarting && !storageIsReady
+                            ColorAnimation { from: theme.textPlace; to: theme.accent; duration: 700 }
+                            ColorAnimation { from: theme.accent;    to: theme.textPlace; duration: 700 }
+                        }
+                    }
+                    MouseArea {
+                        id: storageHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        ToolTip.visible: containsMouse
+                        ToolTip.text: storageTooltip()
+                        ToolTip.delay: 200
+                        // Pin the tooltip longer so users can read multi-line addrs.
+                        ToolTip.timeout: 15000
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: storageInfoDialog.open()
                     }
                 }
                 Text {
@@ -717,6 +750,97 @@ Rectangle {
             attachPathInput.text = ""
         }
         onRejected: attachPathInput.text = ""
+    }
+
+    Dialog {
+        id: storageInfoDialog
+        title: "Storage Node"
+        anchors.centerIn: parent
+        width: 620; modal: true
+        padding: 20
+        background: Rectangle { color: theme.bgSecondary; border.color: theme.border; border.width: 1; radius: 12 }
+        header: Item {
+            height: 40
+            Text {
+                anchors.left: parent.left; anchors.leftMargin: 24
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Storage Node"; color: theme.text
+                font.pixelSize: 16; font.weight: Font.Bold
+            }
+        }
+        contentItem: ColumnLayout {
+            spacing: 10
+            Text {
+                text: "Identity + listen addresses for this node. Share the SPR with NAT'd peers and set up port-forwarding for any listen port you want reachable from the public internet."
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                color: theme.textSec
+                font.pixelSize: theme.fontSecondary
+            }
+            Text { text: storageIsReady ? "Ready" : "Not ready"; color: storageIsReady ? theme.accent : theme.textPlace; font.pixelSize: theme.fontSecondary }
+
+            function row(label, value) { return label + ": " + value }
+
+            Text { text: "Peer ID"; color: theme.textMuted; font.pixelSize: theme.fontSecondary }
+            TextField {
+                text: storagePeerId
+                readOnly: true
+                selectByMouse: true
+                Layout.fillWidth: true
+                font.pixelSize: theme.fontPrimary; color: theme.text
+                background: Rectangle { color: theme.bgInset; border.color: theme.border; border.width: 1; radius: 6 }
+            }
+
+            Text { text: "SPR"; color: theme.textMuted; font.pixelSize: theme.fontSecondary }
+            TextField {
+                text: storageSpr
+                readOnly: true
+                selectByMouse: true
+                Layout.fillWidth: true
+                font.pixelSize: theme.fontSecondary; color: theme.text
+                background: Rectangle { color: theme.bgInset; border.color: theme.border; border.width: 1; radius: 6 }
+            }
+
+            Text { text: "Listen addresses (ports to forward)"; color: theme.textMuted; font.pixelSize: theme.fontSecondary }
+            Repeater {
+                model: storageListenAddrs
+                delegate: TextField {
+                    text: modelData
+                    readOnly: true; selectByMouse: true
+                    Layout.fillWidth: true
+                    font.pixelSize: theme.fontSecondary; color: theme.text
+                    background: Rectangle { color: theme.bgInset; border.color: theme.border; border.width: 1; radius: 6 }
+                }
+            }
+
+            Text { text: "Announce addresses"; color: theme.textMuted; font.pixelSize: theme.fontSecondary }
+            Repeater {
+                model: storageAnnounceAddrs
+                delegate: TextField {
+                    text: modelData
+                    readOnly: true; selectByMouse: true
+                    Layout.fillWidth: true
+                    font.pixelSize: theme.fontSecondary; color: theme.text
+                    background: Rectangle { color: theme.bgInset; border.color: theme.border; border.width: 1; radius: 6 }
+                }
+            }
+
+            Item { Layout.fillHeight: true; Layout.minimumHeight: 4 }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Close"
+                    font.pixelSize: theme.fontPrimary
+                    contentItem: Text { text: parent.text; color: theme.text; font: parent.font; horizontalAlignment: Text.AlignHCenter }
+                    background: Rectangle {
+                        color: parent.down ? theme.border : theme.surface
+                        radius: 6; implicitWidth: 80; implicitHeight: 34
+                    }
+                    onClicked: storageInfoDialog.close()
+                }
+            }
+        }
     }
 
     Dialog {
