@@ -254,31 +254,30 @@ Rectangle {
                         ColorAnimation { from: theme.accent;    to: theme.textPlace; duration: 700 }
                     }
                 }
-                Item {
-                    implicitWidth: storageIcon.implicitWidth
-                    implicitHeight: storageIcon.implicitHeight
-                    Text {
-                        id: storageIcon
-                        text: "\u25A4"; font.pixelSize: 14
-                        color: storageIsReady ? theme.accent : theme.textPlace
-                        SequentialAnimation on color {
-                            loops: Animation.Infinite
-                            running: storageStarting && !storageIsReady
-                            ColorAnimation { from: theme.textPlace; to: theme.accent; duration: 700 }
-                            ColorAnimation { from: theme.accent;    to: theme.textPlace; duration: 700 }
-                        }
+                Text {
+                    id: storageIcon
+                    text: "\u25A4"; font.pixelSize: 14
+                    color: storageIsReady ? theme.accent : theme.textPlace
+                    Layout.preferredWidth: 18
+                    Layout.preferredHeight: 18
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    SequentialAnimation on color {
+                        loops: Animation.Infinite
+                        running: storageStarting && !storageIsReady
+                        ColorAnimation { from: theme.textPlace; to: theme.accent; duration: 700 }
+                        ColorAnimation { from: theme.accent;    to: theme.textPlace; duration: 700 }
                     }
                     MouseArea {
                         id: storageHover
                         anchors.fill: parent
                         hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: storageInfoDialog.open()
                         ToolTip.visible: containsMouse
                         ToolTip.text: storageTooltip()
                         ToolTip.delay: 200
-                        // Pin the tooltip longer so users can read multi-line addrs.
                         ToolTip.timeout: 15000
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: storageInfoDialog.open()
                     }
                 }
                 Text {
@@ -778,8 +777,6 @@ Rectangle {
                 font.pixelSize: theme.fontSecondary
             }
             Text { text: storageIsReady ? "Ready" : "Not ready"; color: storageIsReady ? theme.accent : theme.textPlace; font.pixelSize: theme.fontSecondary }
-
-            function row(label, value) { return label + ": " + value }
 
             Text { text: "Peer ID"; color: theme.textMuted; font.pixelSize: theme.fontSecondary }
             TextField {
