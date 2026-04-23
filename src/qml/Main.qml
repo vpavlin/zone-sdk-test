@@ -467,7 +467,7 @@ Rectangle {
                             required property var modelData
                             required property int index
                             property string chId: modelData.id || ""
-                            property real backfillProg: backfillProgressMap[chId] || -1
+                            property real backfillProg: backfillProgressMap.hasOwnProperty(chId) ? backfillProgressMap[chId] : -1
                             property bool backfilling: backfillProg >= 0
                             property bool selected: index === currentChannelIndex
                             property bool hovered: chMouse.containsMouse
@@ -491,23 +491,36 @@ Rectangle {
                                         font.weight: chDelegate.selected ? Font.Medium : Font.Normal
                                         elide: Text.ElideRight
                                     }
+                                    // Refetch button — 28x28 hit target on top of chMouse.
+                                    // Always visible on hover/selected/backfilling so the user
+                                    // has something to click without first selecting the row.
                                     Rectangle {
-                                        visible: chDelegate.backfilling || chDelegate.selected
-                                        width: 20; height: 20; radius: 10; z: 1
-                                        color: chDelegate.backfilling ? theme.accent : "transparent"
+                                        id: refetchBtn
+                                        visible: chDelegate.backfilling || chDelegate.selected || chDelegate.hovered
+                                        width: 28; height: 28; radius: 14; z: 2
+                                        color: chDelegate.backfilling ? theme.accent
+                                             : refetchMouse.containsMouse ? theme.surface
+                                             : "transparent"
                                         border.color: chDelegate.backfilling ? "transparent" : theme.border
                                         border.width: 1
                                         Text {
                                             anchors.centerIn: parent
-                                            text: "\u27F3"
+                                            text: chDelegate.backfilling ? "\u25A0" : "\u27F3"
                                             color: chDelegate.backfilling ? theme.text : theme.textMuted
-                                            font.pixelSize: 12
+                                            font.pixelSize: 14
                                         }
                                         MouseArea {
+                                            id: refetchMouse
                                             anchors.fill: parent
-                                            onClicked: chDelegate.backfilling
-                                                ? doStopBackfill(chDelegate.chId)
-                                                : doStartBackfill(chDelegate.chId)
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: function(mouse) {
+                                                mouse.accepted = true
+                                                if (chDelegate.backfilling)
+                                                    doStopBackfill(chDelegate.chId)
+                                                else
+                                                    doStartBackfill(chDelegate.chId)
+                                            }
                                         }
                                     }
                                     Rectangle {

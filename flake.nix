@@ -166,7 +166,10 @@
                         if key in metadata:
                             manifest[key] = metadata[key]
                     if 'main' in manifest and isinstance(manifest['main'], dict):
-                        manifest["main"] = {k.replace("-dev", ""): v for k, v in manifest["main"].items() if k in built_variants}
+                        # Keep `-dev` suffix — basecamp matches the installed
+                        # `variant` file (e.g. linux-x86_64-dev) against manifest
+                        # `main` keys. Stripping `-dev` silently breaks loading.
+                        manifest["main"] = {k: v for k, v in manifest["main"].items() if k in built_variants}
                     data = json.dumps(manifest, indent=2).encode()
                     member.size = len(data)
                 patched.append((member, data))

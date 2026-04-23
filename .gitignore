@@ -27,3 +27,10 @@ target/
 sequencer.checkpoint*
 media_cache/
 storage/
+
+# Local basecamp dogfood scratch dirs
+modules/
+plugins/
+.claude/
+.scaffold/
+scaffold.toml
