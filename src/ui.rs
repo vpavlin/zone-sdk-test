@@ -195,7 +195,7 @@ fn render_bottom(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     // Help line
     let help = Paragraph::new(
-        " ↑↓ select channel  Enter publish  /sub <name|hex>  /unsub  /resync  /quit",
+        " ↑↓ select channel  Enter publish  /sub <name|hex>  /unsub  /resync  /upload <path> [caption]  /quit",
     )
     .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(help, rows[2]);

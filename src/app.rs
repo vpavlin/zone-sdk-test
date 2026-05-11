@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config;
+use crate::{config, storage::StorageClient};
 
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
 /// How long to wait for the sequencer to respond before giving up.
@@ -132,6 +132,8 @@ pub struct App {
     conn_tx: mpsc::Sender<bool>,
     conn_rx: mpsc::Receiver<bool>,
 
+    storage: Option<StorageClient>,
+
     indexer_handles: HashMap<ChannelId, IndexerHandles>,
     pub should_quit: bool,
     /// Channels currently running the historical backfill.
@@ -149,6 +151,7 @@ impl App {
         handle: SequencerHandle<NodeHttpClient>,
         node: NodeHttpClient,
         data_dir: PathBuf,
+        storage: Option<StorageClient>,
     ) -> Self {
         let (msg_tx, msg_rx) = mpsc::channel(1024);
         let (status_tx, status_rx) = mpsc::channel(64);
@@ -186,6 +189,8 @@ impl App {
             sync_rx,
             conn_tx,
             conn_rx,
+            storage,
+
             indexer_handles: HashMap::new(),
             should_quit: false,
             syncing: HashSet::new(),
@@ -670,6 +675,70 @@ impl App {
         self.status = "waiting for sequencer…".to_string();
     }
 
+    async fn upload_and_publish(&mut self, path: String, caption: String) {
+        let Some(client) = self.storage.clone() else {
+            self.status = "no storage URL configured — pass --storage-url".to_string();
+            return;
+        };
+
+        self.status = format!("uploading {}…", path);
+        let status_tx = self.status_tx.clone();
+        let mut handle = self.handle.clone();
+        let fail_tx = self.publish_fail_tx.clone();
+        let checkpoint_tx = self.checkpoint_tx.clone();
+
+        tokio::spawn(async move {
+            let upload = client.upload_file(&path).await;
+            match upload {
+                Err(e) => {
+                    let _ = status_tx.send(format!("upload failed: {e}")).await;
+                }
+                Ok(r) => {
+                    let payload = serde_json::json!({
+                        "text": caption,
+                        "media": [{
+                            "cid":  r.cid,
+                            "type": r.mime,
+                            "name": r.filename,
+                            "size": r.size,
+                        }]
+                    })
+                    .to_string();
+
+                    let _ = status_tx
+                        .send(format!("uploaded {} → {} — publishing…", r.filename, &r.cid[..12]))
+                        .await;
+
+                    let result = tokio::time::timeout(PUBLISH_TIMEOUT, async {
+                        handle.wait_ready().await;
+                        handle.publish_message(payload.as_bytes().to_vec()).await
+                    })
+                    .await;
+
+                    match result {
+                        Ok(Ok(res)) => {
+                            let hash: [u8; 32] = res.inscription_id.into();
+                            let _ = status_tx
+                                .send(format!("published: {} (pending)", &hex::encode(hash)[..16]))
+                                .await;
+                            let _ = checkpoint_tx.send(res.checkpoint).await;
+                        }
+                        Ok(Err(e)) => {
+                            let _ = status_tx.send(format!("publish error: {e}")).await;
+                            let _ = fail_tx.send(payload).await;
+                        }
+                        Err(_) => {
+                            let _ = status_tx
+                                .send(format!("publish timed out after {}s", PUBLISH_TIMEOUT.as_secs()))
+                                .await;
+                            let _ = fail_tx.send(payload).await;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     async fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -711,6 +780,12 @@ impl App {
                         ChannelId::from(arr)
                     });
                     self.subscribe(channel_id);
+                } else if let Some(rest) = input.strip_prefix("/upload ") {
+                    // /upload <path> [optional caption]
+                    let mut parts = rest.splitn(2, ' ');
+                    let path = parts.next().unwrap_or("").trim().to_string();
+                    let caption = parts.next().unwrap_or("").trim().to_string();
+                    self.upload_and_publish(path, caption).await;
                 } else if input == "/unsub" {
                     self.unsubscribe_selected();
                 } else if input == "/resync" {

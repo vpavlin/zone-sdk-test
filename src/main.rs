@@ -12,6 +12,7 @@ use reqwest::Url;
 
 mod app;
 mod config;
+mod storage;
 mod ui;
 
 use app::App;
@@ -34,6 +35,10 @@ struct Args {
     /// and saved to <data-dir>/channel.id.
     #[arg(long, env = "CHANNEL")]
     channel: Option<String>,
+
+    /// Logos Storage (Codex) REST API base URL. Enables /upload <path>.
+    #[arg(long, env = "STORAGE_URL")]
+    storage_url: Option<String>,
 }
 
 /// Parse a channel argument: 64-char hex → raw bytes; anything else → "logos:yolo:<name>".
@@ -91,8 +96,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (sequencer, handle) = ZoneSequencer::init(my_channel_id, key, node.clone(), checkpoint);
     sequencer.spawn();
 
+    // Build storage client if --storage-url was provided
+    let storage = args.storage_url.as_deref().map(|url| {
+        storage::StorageClient::new(url).expect("invalid storage URL")
+    });
+
     // Build the application state
-    let mut app = App::new(my_channel_id, handle, node, data_dir.clone());
+    let mut app = App::new(my_channel_id, handle, node, data_dir.clone(), storage);
 
     // Load cached messages for own channel before starting the indexer
     app.load_cache_for(my_channel_id);
