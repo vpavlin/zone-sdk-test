@@ -36,9 +36,13 @@ struct Args {
     #[arg(long, env = "CHANNEL")]
     channel: Option<String>,
 
-    /// Logos Storage (Codex) REST API base URL. Enables /upload <path>.
+    /// Logos Storage REST API base URL. Enables /upload <path>.
     #[arg(long, env = "STORAGE_URL")]
     storage_url: Option<String>,
+
+    /// Logos Storage REST API path prefix.
+    #[arg(long, env = "STORAGE_PREFIX", default_value = "api/storage/v1")]
+    storage_prefix: String,
 }
 
 /// Parse a channel argument: 64-char hex → raw bytes; anything else → "logos:yolo:<name>".
@@ -98,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build storage client if --storage-url was provided
     let storage = args.storage_url.as_deref().map(|url| {
-        storage::StorageClient::new(url).expect("invalid storage URL")
+        storage::StorageClient::new(url, &args.storage_prefix).expect("invalid storage URL")
     });
 
     // Build the application state

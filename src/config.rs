@@ -109,6 +109,28 @@ pub fn channel_id_label(channel_id: ChannelId) -> String {
     format!("{}...", &hex::encode(bytes)[..12])
 }
 
+/// Per-channel indexer progress: highest slot successfully scanned.
+pub fn save_index_slot(data_dir: &Path, channel_id: ChannelId, slot: u64) {
+    let path = index_slot_path(data_dir, channel_id);
+    let _ = fs::write(path, slot.to_string());
+}
+
+pub fn load_index_slot(data_dir: &Path, channel_id: ChannelId) -> u64 {
+    let path = index_slot_path(data_dir, channel_id);
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn clear_index_slot(data_dir: &Path, channel_id: ChannelId) {
+    let _ = fs::remove_file(index_slot_path(data_dir, channel_id));
+}
+
+fn index_slot_path(data_dir: &Path, channel_id: ChannelId) -> std::path::PathBuf {
+    data_dir.join(format!("index_{}.slot", hex::encode(channel_id.as_ref())))
+}
+
 /// Save subscribed channel IDs as a JSON list of hex strings.
 pub fn save_subscriptions(path: &Path, channel_ids: &[String]) {
     let data = serde_json::to_vec(channel_ids).expect("failed to serialize subscriptions");

@@ -1,23 +1,23 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
-
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Clone)]
 pub struct StorageClient {
     base: String,
+    prefix: String,
     client: reqwest::Client,
 }
 
 impl StorageClient {
-    pub fn new(base_url: &str) -> Result<Self, Error> {
+    pub fn new(base_url: &str, prefix: &str) -> Result<Self, Error> {
         let base = base_url.trim_end_matches('/').to_string();
+        let prefix = format!("/{}", prefix.trim_matches('/'));
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()?;
-        Ok(Self { base, client })
+        Ok(Self { base, prefix, client })
     }
 
     pub async fn upload_file(&self, path: &str) -> Result<UploadResult, Error> {
@@ -32,7 +32,7 @@ impl StorageClient {
             .to_string_lossy()
             .to_string();
 
-        let url = format!("{}/api/codex/v1/data", self.base);
+        let url = format!("{}{}/data", self.base, self.prefix);
         let resp = self
             .client
             .post(&url)
@@ -43,14 +43,11 @@ impl StorageClient {
             .await?
             .error_for_status()?;
 
-        #[derive(Deserialize)]
-        struct Resp {
-            cid: String,
-        }
-        let r: Resp = resp.json().await
-            .map_err(|e| format!("parse upload response: {e}"))?;
+        let cid = resp.text().await
+            .map_err(|e| format!("read upload response: {e}"))?;
+        let cid = cid.trim().to_string();
         Ok(UploadResult {
-            cid: r.cid,
+            cid,
             mime: mime.to_string(),
             filename,
             size,

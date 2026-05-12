@@ -20,6 +20,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::{config, storage::StorageClient};
 
+/// Extract the reply-to block_id from a message payload, if present.
+fn parse_reply_to(text: &str) -> Option<[u8; 32]> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let rt = v["rt"].as_str()?;
+    let bytes = hex::decode(rt).ok()?;
+    bytes.try_into().ok()
+}
+
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return format!("{}/{rest}", home.to_string_lossy());
+        }
+    } else if path == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return home.to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
 /// How long to wait for the sequencer to respond before giving up.
 /// ZK proof generation (rapidsnark) can take 10–60 s on slower hardware.
@@ -30,6 +51,13 @@ pub struct ChannelEntry {
     /// Short display label (≤ 20 chars).
     pub label: String,
     pub is_own: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Channels,
+    Messages,
+    Thread,
 }
 
 /// Signals emitted by an indexer's historical backfill task.
@@ -122,6 +150,9 @@ pub struct App {
     /// can mark the matching pending entry as failed instead of pending forever.
     publish_fail_tx: mpsc::Sender<String>,
     publish_fail_rx: mpsc::Receiver<String>,
+    /// Lets background tasks (upload) inject a pending message into the feed.
+    pending_add_tx: mpsc::Sender<PendingMessage>,
+    pending_add_rx: mpsc::Receiver<PendingMessage>,
     checkpoint_rx: mpsc::Receiver<SequencerCheckpoint>,
     checkpoint_tx: mpsc::Sender<SequencerCheckpoint>,
     /// Signals from indexers: backfill lifecycle + per-channel progress.
@@ -143,6 +174,16 @@ pub struct App {
     pub sync_progress: HashMap<ChannelId, (u64, u64)>,
     /// Whether at least one block stream is currently live.
     pub node_connected: bool,
+
+    /// Which UI panel has keyboard focus.
+    pub focus: Focus,
+    /// Index of the selected message counting from the bottom (0 = most recent).
+    /// Only meaningful when focus == Messages or Thread.
+    pub msg_selected: usize,
+    /// Block ID of the message whose thread is currently open.
+    pub thread_view: Option<[u8; 32]>,
+    /// Thread replies indexed by parent block_id.
+    pub thread_replies: HashMap<[u8; 32], VecDeque<DisplayMessage>>,
 }
 
 impl App {
@@ -156,6 +197,7 @@ impl App {
         let (msg_tx, msg_rx) = mpsc::channel(1024);
         let (status_tx, status_rx) = mpsc::channel(64);
         let (publish_fail_tx, publish_fail_rx) = mpsc::channel(64);
+        let (pending_add_tx, pending_add_rx) = mpsc::channel(64);
         let (checkpoint_tx, checkpoint_rx) = mpsc::channel(64);
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (conn_tx, conn_rx) = mpsc::channel(64);
@@ -183,6 +225,8 @@ impl App {
             status_rx,
             publish_fail_tx,
             publish_fail_rx,
+            pending_add_tx,
+            pending_add_rx,
             checkpoint_tx,
             checkpoint_rx,
             sync_tx,
@@ -196,6 +240,11 @@ impl App {
             syncing: HashSet::new(),
             sync_progress: HashMap::new(),
             node_connected: false,
+
+            focus: Focus::Channels,
+            msg_selected: 0,
+            thread_view: None,
+            thread_replies: HashMap::new(),
         }
     }
 
@@ -208,6 +257,8 @@ impl App {
         let msg_tx = self.msg_tx.clone();
         let sync_tx = self.sync_tx.clone();
         let conn_tx = self.conn_tx.clone();
+        let data_dir = self.data_dir.clone();
+        let resume_slot = Slot::from(config::load_index_slot(&data_dir, channel_id));
 
         // Cancellation signal for the live-stream sub-task.
         // Sending `true` (or simply dropping the sender) stops the inner task.
@@ -250,6 +301,7 @@ impl App {
                 from: Slot,
                 to: Slot,
                 batch: u64,
+                data_dir: &std::path::Path,
             ) -> bool {
                 let mut cur = from;
                 while cur <= to {
@@ -270,6 +322,8 @@ impl App {
                             }
                             // Advance only on success so a failed batch is retried.
                             cur = Slot::from(end.into_inner().saturating_add(1));
+                            // Persist progress so resync can resume from here.
+                            config::save_index_slot(data_dir, channel_id, cur.into_inner());
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -291,8 +345,8 @@ impl App {
                 true
             }
 
-            // Main backfill: genesis → canonical tip at startup.
-            if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, Slot::genesis(), tip_at_start, BATCH).await {
+            // Main backfill: resume slot → canonical tip at startup.
+            if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, resume_slot, tip_at_start, BATCH, &data_dir).await {
                 return;
             }
 
@@ -308,7 +362,7 @@ impl App {
                     break; // caught up
                 }
                 let from = Slot::from(prev_tip.into_inner().saturating_add(1));
-                if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, from, new_tip, BATCH).await {
+                if !fetch_range(&node, &msg_tx, &sync_tx, channel_id, from, new_tip, BATCH, &data_dir).await {
                     return;
                 }
                 prev_tip = new_tip;
@@ -523,9 +577,10 @@ impl App {
         self.seen_count.remove(&id);
         self.syncing.remove(&id);
         self.sync_progress.remove(&id);
-        // Remove the on-disk cache so the full backfill runs again
+        // Remove the on-disk cache and saved slot so the full backfill runs again
         let cache = self.cache_path(id);
         let _ = std::fs::remove_file(&cache);
+        config::clear_index_slot(&self.data_dir, id);
         // Restart the indexer
         self.spawn_indexer_for(id);
         self.status = format!("resyncing {}…", self.channels[self.selected].label);
@@ -683,9 +738,11 @@ impl App {
 
         self.status = format!("uploading {}…", path);
         let status_tx = self.status_tx.clone();
+        let pending_tx = self.pending_add_tx.clone();
         let mut handle = self.handle.clone();
         let fail_tx = self.publish_fail_tx.clone();
         let checkpoint_tx = self.checkpoint_tx.clone();
+        let my_channel_id = self.my_channel_id;
 
         tokio::spawn(async move {
             let upload = client.upload_file(&path).await;
@@ -704,6 +761,13 @@ impl App {
                         }]
                     })
                     .to_string();
+
+                    // Show as pending immediately so it appears in the feed
+                    let _ = pending_tx.send(PendingMessage {
+                        channel_id: my_channel_id,
+                        text: payload.clone(),
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    }).await;
 
                     let _ = status_tx
                         .send(format!("uploaded {} → {} — publishing…", r.filename, &r.cid[..12]))
@@ -744,17 +808,70 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
+            KeyCode::Tab => {
+                self.focus = match self.focus {
+                    Focus::Channels => Focus::Messages,
+                    Focus::Messages => {
+                        if self.thread_view.is_some() { Focus::Thread } else { Focus::Channels }
+                    }
+                    Focus::Thread => Focus::Channels,
+                };
+            }
+            KeyCode::Esc => {
+                match self.focus {
+                    Focus::Thread => {
+                        self.thread_view = None;
+                        self.focus = Focus::Messages;
+                    }
+                    Focus::Messages => {
+                        self.focus = Focus::Channels;
+                    }
+                    Focus::Channels => {}
+                }
+            }
             KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
+                match self.focus {
+                    Focus::Channels => {
+                        self.selected = self.selected.saturating_sub(1);
+                        self.msg_selected = 0;
+                    }
+                    Focus::Messages => {
+                        // Scroll toward older messages (higher index from bottom)
+                        let channel_id = self.channels[self.selected].id;
+                        let len = self.messages.get(&channel_id).map(|m| m.len()).unwrap_or(0);
+                        if len > 0 && self.msg_selected + 1 < len {
+                            self.msg_selected += 1;
+                        }
+                    }
+                    Focus::Thread => {}
+                }
             }
             KeyCode::Down => {
-                if self.selected + 1 < self.channels.len() {
-                    self.selected += 1;
+                match self.focus {
+                    Focus::Channels => {
+                        if self.selected + 1 < self.channels.len() {
+                            self.selected += 1;
+                            self.msg_selected = 0;
+                        }
+                    }
+                    Focus::Messages => {
+                        // Scroll toward newer messages
+                        self.msg_selected = self.msg_selected.saturating_sub(1);
+                    }
+                    Focus::Thread => {}
                 }
             }
             KeyCode::Enter => {
                 let input = self.input.trim().to_string();
                 self.input.clear();
+
+                if input.is_empty() {
+                    // In Messages focus with no input: open thread for selected message
+                    if self.focus == Focus::Messages {
+                        self.open_selected_thread();
+                    }
+                    return;
+                }
 
                 if let Some(rest) = input.strip_prefix("/sub ") {
                     let arg = rest.trim();
@@ -781,11 +898,9 @@ impl App {
                     });
                     self.subscribe(channel_id);
                 } else if let Some(rest) = input.strip_prefix("/upload ") {
-                    // /upload <path> [optional caption]
-                    let mut parts = rest.splitn(2, ' ');
-                    let path = parts.next().unwrap_or("").trim().to_string();
-                    let caption = parts.next().unwrap_or("").trim().to_string();
-                    self.upload_and_publish(path, caption).await;
+                    // /upload <path>  — path is the entire remainder (spaces ok, ~ expanded)
+                    let path = expand_tilde(rest.trim());
+                    self.upload_and_publish(path, String::new()).await;
                 } else if input == "/unsub" {
                     self.unsubscribe_selected();
                 } else if input == "/resync" {
@@ -794,7 +909,12 @@ impl App {
                     self.should_quit = true;
                 } else if input.starts_with('/') {
                     self.status = format!("unknown command: {input}");
-                } else if !input.is_empty() {
+                } else if self.focus == Focus::Thread {
+                    // Publish as a reply to the open thread
+                    if let Some(parent_id) = self.thread_view {
+                        self.publish_reply(parent_id, input).await;
+                    }
+                } else {
                     self.publish_input(input).await;
                 }
             }
@@ -835,11 +955,105 @@ impl App {
         total.saturating_sub(seen)
     }
 
+    /// Number of confirmed thread replies for a given parent block_id.
+    pub fn reply_count(&self, block_id: [u8; 32]) -> usize {
+        self.thread_replies.get(&block_id).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Open the thread for the currently selected message (Messages focus).
+    fn open_selected_thread(&mut self) {
+        let channel_id = self.channels[self.selected].id;
+        let msgs = match self.messages.get(&channel_id) {
+            Some(m) if !m.is_empty() => m,
+            _ => return,
+        };
+        let idx = msgs.len().saturating_sub(1 + self.msg_selected);
+        if let Some(block_id) = msgs[idx].block_id {
+            self.thread_view = Some(block_id);
+            self.focus = Focus::Thread;
+        } else {
+            self.status = "cannot thread a pending/failed message".to_string();
+        }
+    }
+
+    async fn publish_reply(&mut self, parent_id: [u8; 32], text: String) {
+        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+        let payload = serde_json::json!({
+            "v": 1,
+            "text": text,
+            "rt": hex::encode(parent_id),
+        }).to_string();
+
+        // Optimistic pending entry in thread panel
+        let bucket = self.thread_replies.entry(parent_id).or_default();
+        bucket.push_back(DisplayMessage {
+            text: payload.clone(),
+            timestamp,
+            pending: true,
+            failed: false,
+            block_id: None,
+        });
+
+        let mut handle = self.handle.clone();
+        let status_tx = self.status_tx.clone();
+        let checkpoint_tx = self.checkpoint_tx.clone();
+
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(PUBLISH_TIMEOUT, async {
+                handle.wait_ready().await;
+                handle.publish_message(payload.as_bytes().to_vec()).await
+            }).await;
+
+            match result {
+                Ok(Ok(r)) => {
+                    let hash: [u8; 32] = r.inscription_id.into();
+                    let _ = status_tx.send(format!("reply published: {}", &hex::encode(hash)[..16])).await;
+                    let _ = checkpoint_tx.send(r.checkpoint).await;
+                }
+                Ok(Err(e)) => {
+                    let _ = status_tx.send(format!("reply error: {e}")).await;
+                }
+                Err(_) => {
+                    let _ = status_tx.send(format!("reply timed out after {}s", PUBLISH_TIMEOUT.as_secs())).await;
+                }
+            }
+        });
+
+        self.status = "sending reply…".to_string();
+    }
+
     fn drain_background_channels(&mut self) {
         // Incoming finalized messages from indexers — clear matching pending entries
         while let Ok((channel_id, block)) = self.msg_rx.try_recv() {
             let block_id: [u8; 32] = block.id.into();
             let text = String::from_utf8_lossy(&block.data).into_owned();
+
+            // Route thread replies to thread_replies, not the main feed
+            if let Some(parent_id) = parse_reply_to(&text) {
+                let bucket = self.thread_replies.entry(parent_id).or_default();
+                if bucket.iter().any(|m| m.block_id == Some(block_id)) {
+                    continue;
+                }
+                let confirmed = bucket.iter_mut().find(|m| (m.pending || m.failed) && m.text == text);
+                if let Some(m) = confirmed {
+                    m.pending = false;
+                    m.failed = false;
+                    m.block_id = Some(block_id);
+                } else {
+                    bucket.push_back(DisplayMessage {
+                        text,
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        pending: false,
+                        failed: false,
+                        block_id: Some(block_id),
+                    });
+                    while bucket.len() > MAX_MESSAGES_PER_CHANNEL {
+                        bucket.pop_front();
+                    }
+                }
+                continue;
+            }
+
             let bucket = self.messages.entry(channel_id).or_default();
 
             // Skip if already present (backfill and live stream may both deliver same block).
@@ -867,6 +1081,11 @@ impl App {
                     bucket.pop_front();
                 }
             }
+        }
+
+        // Pending messages injected by background tasks (e.g. upload)
+        while let Ok(pending) = self.pending_add_rx.try_recv() {
+            self.add_pending_message(pending);
         }
 
         // Failed publish notifications — mark the matching pending entry as failed.
