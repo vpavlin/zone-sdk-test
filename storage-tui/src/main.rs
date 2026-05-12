@@ -13,6 +13,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use std::path::Path;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin},
@@ -175,9 +176,46 @@ impl Client {
         let slice = if bytes.len() > limit { &bytes[..limit] } else { &bytes[..] };
         Ok(String::from_utf8_lossy(slice).into_owned())
     }
+
+    async fn upload_file(&self, path: &str) -> Result<String> {
+        let path = Path::new(path);
+        let bytes = tokio::fs::read(path).await.context("read file")?;
+        let mime = mime_from_path(path);
+        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let url = self.url("/data");
+        let resp = self.client
+            .post(&url)
+            .header("Content-Type", mime)
+            .header("Codex-Filename", &filename)
+            .body(bytes)
+            .send()
+            .await?
+            .error_for_status()?;
+        #[derive(serde::Deserialize)]
+        struct UploadResp { cid: String }
+        let r: UploadResp = resp.json().await.context("parse upload response")?;
+        Ok(r.cid)
+    }
+}
+
+fn mime_from_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+        Some("png")          => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif")          => "image/gif",
+        Some("webp")         => "image/webp",
+        Some("mp4")          => "video/mp4",
+        Some("webm")         => "video/webm",
+        Some("txt")          => "text/plain",
+        Some("json")         => "application/json",
+        _                    => "application/octet-stream",
+    }
 }
 
 // ── App state ────────────────────────────────────────────────────────────────
+
+#[derive(Default, PartialEq)]
+enum InputMode { #[default] None, Fetch, Upload }
 
 #[derive(Default)]
 struct AppState {
@@ -189,7 +227,7 @@ struct AppState {
     last_refresh: Option<std::time::Instant>,
     status: String,
     input: String,
-    input_focus: bool,
+    input_mode: InputMode,
     list_state: ListState,
     viewer: Option<Viewer>,
 }
@@ -206,6 +244,7 @@ impl AppState {
         let i = self.list_state.selected()?;
         self.manifests.get(i)
     }
+    fn input_active(&self) -> bool { self.input_mode != InputMode::None }
 }
 
 fn human_bytes(n: u64) -> String {
@@ -377,22 +416,27 @@ fn draw(f: &mut ratatui::Frame, state: &mut AppState, args: &Args) {
     );
 
     // ── Input ──
-    let input_style = if state.input_focus {
+    let active = state.input_active();
+    let input_style = if active {
         Style::default().fg(Color::White).bg(Color::Rgb(40, 40, 40))
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    let (prompt_label, box_title) = match state.input_mode {
+        InputMode::Upload => ("upload> ", " Upload file "),
+        _ => ("fetch> ", " Fetch CID "),
+    };
+    let box_title = if state.status.is_empty() {
+        format!(" {} ", box_title.trim())
+    } else {
+        format!(" {} — {} ", box_title.trim(), state.status)
+    };
     let input = Paragraph::new(Line::from(vec![
-        Span::styled("fetch> ", Style::default().fg(Color::DarkGray)),
+        Span::styled(prompt_label, Style::default().fg(Color::DarkGray)),
         Span::styled(state.input.clone(), input_style),
-        Span::styled(
-            if state.input_focus { "_" } else { "" },
-            Style::default().fg(Color::White),
-        ),
+        Span::styled(if active { "_" } else { "" }, Style::default().fg(Color::White)),
     ]))
-    .block(Block::default().borders(Borders::ALL).title(
-        if state.status.is_empty() { " Fetch CID ".to_string() } else { format!(" Fetch CID — {} ", state.status) }
-    ));
+    .block(Block::default().borders(Borders::ALL).title(box_title));
     f.render_widget(input, chunks[3]);
 
     // ── Keybinds ──
@@ -405,6 +449,8 @@ fn draw(f: &mut ratatui::Frame, state: &mut AppState, args: &Args) {
         Span::raw(" select  "),
         Span::styled(" / ", Style::default().fg(Color::Black).bg(Color::White)),
         Span::raw(" fetch CID  "),
+        Span::styled(" u ", Style::default().fg(Color::Black).bg(Color::White)),
+        Span::raw(" upload file  "),
         Span::styled(" v ", Style::default().fg(Color::Black).bg(Color::White)),
         Span::raw(" view text  "),
         Span::styled(" enter ", Style::default().fg(Color::Black).bg(Color::White)),
@@ -489,25 +535,37 @@ async fn run_app<B: ratatui::backend::Backend>(
             continue;
         }
 
-        if s.input_focus {
+        if s.input_active() {
             match k.code {
-                KeyCode::Esc => { s.input_focus = false; s.input.clear(); }
+                KeyCode::Esc => { s.input_mode = InputMode::None; s.input.clear(); }
                 KeyCode::Enter => {
-                    let cid = s.input.trim().to_string();
+                    let value = s.input.trim().to_string();
+                    let mode = std::mem::replace(&mut s.input_mode, InputMode::None);
                     s.input.clear();
-                    s.input_focus = false;
-                    if cid.is_empty() {
-                        s.status = "empty cid".into();
-                    } else {
-                        s.status = format!("fetching {}…", short_cid(&cid));
+                    if value.is_empty() {
+                        s.status = "empty input".into();
+                    } else if mode == InputMode::Fetch {
+                        s.status = format!("fetching {}…", short_cid(&value));
                         let client = client.clone();
                         let state = state.clone();
                         tokio::spawn(async move {
-                            let result = client.fetch_cid(&cid).await;
+                            let result = client.fetch_cid(&value).await;
                             let mut s = state.write().await;
                             s.status = match result {
-                                Ok(n) => format!("OK {} ← {}", human_bytes(n), short_cid(&cid)),
-                                Err(e) => format!("ERR {} ({})", short_cid(&cid), e),
+                                Ok(n) => format!("OK {} ← {}", human_bytes(n), short_cid(&value)),
+                                Err(e) => format!("ERR {} ({})", short_cid(&value), e),
+                            };
+                        });
+                    } else {
+                        s.status = format!("uploading {}…", value);
+                        let client = client.clone();
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            let result = client.upload_file(&value).await;
+                            let mut s = state.write().await;
+                            s.status = match result {
+                                Ok(cid) => format!("uploaded → {}", short_cid(&cid)),
+                                Err(e) => format!("upload ERR: {e}"),
                             };
                         });
                     }
@@ -516,7 +574,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 KeyCode::Char(c) => {
                     if k.modifiers.contains(KeyModifiers::CONTROL) && (c == 'c' || c == 'u') {
                         s.input.clear();
-                        if c == 'c' { s.input_focus = false; }
+                        if c == 'c' { s.input_mode = InputMode::None; }
                     } else {
                         s.input.push(c);
                     }
@@ -529,9 +587,14 @@ async fn run_app<B: ratatui::backend::Backend>(
         match k.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break,
-            KeyCode::Char('r') => { s.last_refresh = None; /* poller loops on its own */ }
+            KeyCode::Char('r') => { s.last_refresh = None; }
             KeyCode::Char('/') => {
-                s.input_focus = true;
+                s.input_mode = InputMode::Fetch;
+                s.input.clear();
+                s.status.clear();
+            }
+            KeyCode::Char('u') => {
+                s.input_mode = InputMode::Upload;
                 s.input.clear();
                 s.status.clear();
             }
