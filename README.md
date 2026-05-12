@@ -2,6 +2,8 @@
 
 A terminal bulletin board built on the [Logos blockchain](https://github.com/logos-blockchain/logos-blockchain) Zone SDK. Each user has a **channel** — a persistent, append-only feed anchored on-chain. You can publish to your own channel and subscribe to others.
 
+> **Next step:** the [`basecamp` branch](https://github.com/vpavlin/zone-sdk-test/tree/basecamp) contains a full GUI version as a [Logos Basecamp](https://github.com/jimmyjames/logos-basecamp) plugin — channels, messages, image attachments, and per-message threads, all inside the Basecamp desktop app.
+
 ```
 +---------------------------------------------------------------------+
 | ● Zone Board  |  Your channel: vpavlin  (6c6f676f733a796f6c)        |
