@@ -5,20 +5,17 @@ A terminal bulletin board built on the [Logos blockchain](https://github.com/log
 > **Next step:** the [`basecamp` branch](https://github.com/vpavlin/zone-sdk-test/tree/basecamp) contains a full GUI version as a [Logos Basecamp](https://github.com/jimmyjames/logos-basecamp) plugin — channels, messages, image attachments, and per-message threads, all inside the Basecamp desktop app.
 
 ```
-+---------------------------------------------------------------------+
-| ● Zone Board  |  Your channel: vpavlin  (6c6f676f733a796f6c)        |
-|               ⟳ [████████████░░░░░░░░]  62%                         |
-+----------------+----------------------------------------------------+
-| Channels       |  [you] vpavlin                                     |
-|                |                                                    |
-| ▶[you] vpavlin |  12:00:01  Hello world                             |
-|  alice  [3]    |  12:01:33  Another message                         |
-|                |                                                    |
-+----------------+----------------------------------------------------+
-| published: a3f1b2... (pending finalization)                         |
-| > type a message here▌                                              |
-| ↑↓ select channel  Enter publish  /sub <name|hex>  /unsub  /resync  /quit |
-+---------------------------------------------------------------------+
++----------------+-----------------------------+-------------------------+
+| Channels       |  Messages                   |  Thread                 |
+|                |                             |  ↳ Hello world          |
+| ▶[you] vpavlin |  12:00:01  Hello world      |  ─────────────────────  |
+|  alice  [3]    |  12:01:33  Another message  |  12:02:10  nice one!    |
+|                |  12:03:44  [image.png]       |  12:02:55  agreed       |
+|                |                             |  No more replies yet.   |
++----------------+-----------------------------+-------------------------+
+| > type a message here▌                                                |
+| Tab: messages  ↑↓ channel  Enter publish  /sub /unsub /upload /quit  |
++-----------------------------------------------------------------------+
 ```
 
 ---
@@ -49,9 +46,23 @@ Messages go through `ZoneSequencer`, which builds a signed `ChannelInscribe` tra
 
 When you press Enter, the message appears immediately as "pending…" and is confirmed once the live poller delivers the finalized block (within ~3 seconds). If publishing times out or errors, the entry turns red with ✗.
 
+### Image attachments
+
+With `--storage-url` pointing at a Logos Storage (Codex-compatible) node, use `/upload` to attach a file to your next message:
+
+```
+/upload ~/photos/screenshot.png optional caption here
+```
+
+The file is uploaded to storage, the CID is embedded in the message payload as `{"v":1,"text":"caption","media":[{"cid":"..."}]}`, and the message is published on-chain. Recipients with storage access can fetch the file by CID.
+
+### Threaded replies
+
+Press `Tab` from the channel list to focus the message panel, then navigate with `↑`/`↓` and press `Enter` on any message to open its thread. The thread panel shows replies in real time; type a reply and press `Enter` to send. Press `Esc` to close the thread.
+
 ### Reading messages
 
-Backfill scans `zone_messages_in_blocks` from genesis to the current canonical tip in 100-slot batches, followed by a gap-fill loop that catches any blocks that became canonical during the scan.
+Backfill scans `zone_messages_in_blocks` from the last saved slot (or genesis on first run) to the current canonical tip in 100-slot batches. Progress is saved to disk so a restart resumes where it left off rather than rescanning from genesis.
 
 Live delivery uses two concurrent approaches:
 - **`block_stream()`** — SSE stream for immediate delivery of new canonical blocks
@@ -90,24 +101,49 @@ cargo build --release
 
 ```sh
 ./zone-board --node-url http://<node-host>:<port> --channel yourname
-# or via env vars
-NODE_URL=http://localhost:8080 CHANNEL=yourname ./zone-board
+
+# With image upload support (Logos Storage / Codex node):
+./zone-board --node-url http://<node-host>:<port> --channel yourname \
+             --storage-url http://<storage-host>:<port>
+
+# Via env vars:
+NODE_URL=http://localhost:8080 CHANNEL=yourname \
+STORAGE_URL=http://localhost:8090 ./zone-board
 ```
 
 Use `--data-dir /path/to/dir` (or `DATA_DIR=...`) to store data files elsewhere.
 
 ### Controls
 
+**Channel panel** (default focus)
+
 | Key / Command | Action |
 |---------------|--------|
 | `↑` / `↓` | Move between channels |
+| `Tab` | Move focus to message panel |
 | `Enter` | Publish typed message to your channel |
 | `/sub <name>` | Subscribe by name (e.g. `/sub alice`) |
 | `/sub <hex>` | Subscribe by 64-char hex channel ID |
 | `/unsub` | Unsubscribe the currently selected channel |
+| `/upload <path> [caption]` | Upload file to storage and publish CID on-chain |
 | `/resync` | Wipe cache and re-scan selected channel from genesis |
 | `/quit` or `/q` | Exit |
 | `Ctrl+C` | Exit |
+
+**Message panel** (`Tab` to enter)
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Select a message |
+| `Enter` | Open thread for selected message |
+| `Esc` | Return to channel panel |
+
+**Thread panel** (opened with `Enter` on a message)
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send reply |
+| `Esc` | Close thread |
 
 ### Logs
 
@@ -129,6 +165,7 @@ RUST_LOG=info ./zone-board ...   # more verbose
 | `sequencer.checkpoint` | Last confirmed message ID + pending tx list |
 | `subscriptions.json` | Channels to re-subscribe on startup |
 | `cache/<hex>.json` | Cached messages per channel |
+| `index_<hex>.slot` | Last backfill slot per channel (enables resume) |
 | `zone-board.log` | Warnings and errors |
 
 All gitignored, created automatically on first run.
@@ -139,10 +176,11 @@ All gitignored, created automatically on first run.
 
 ```
 src/
-├── main.rs     clap args, startup sequence, terminal setup
-├── app.rs      App state, event loop, sequencer + indexer logic
-├── ui.rs       ratatui layout and rendering
-└── config.rs   key/checkpoint/subscription/cache persistence
+├── main.rs      clap args, startup sequence, terminal setup
+├── app.rs       App state, event loop, sequencer + indexer logic
+├── ui.rs        ratatui layout: channel list, message panel, thread panel
+├── config.rs    key/checkpoint/subscription/cache/slot persistence
+└── storage.rs   Logos Storage (Codex) REST client for /upload
 ```
 
 ---
@@ -153,4 +191,4 @@ src/
 2. **Sender attribution** — `ChannelInscribe` includes a `signer` field. Show the first 8 hex chars as a "from" prefix.
 3. **Channel discovery** — add `/list` to scan recent blocks and list all unique channel IDs seen.
 4. **Message search** — add `/find <keyword>` to search the local message cache.
-5. **Cursor persistence** — save `last_lib` per channel so the live poll resumes where it left off after a restart.
+5. **Cursor persistence** — ✅ done: backfill slot is saved per channel and resumed on restart.
