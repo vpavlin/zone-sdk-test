@@ -18,13 +18,22 @@ Rectangle {
     property var mediaPaths: ({})
     property int currentChannelIndex: 0
     property string pendingAttachment: ""
+    property bool connecting: false
+
+    onIsConnectedChanged: if (isConnected) { connecting = false; connectingTimeout.stop() }
+
+    Timer {
+        id: connectingTimeout
+        interval: 120000
+        onTriggered: connecting = false
+    }
 
     // Derived from stateSnapshot
     readonly property string ownChannelId: stateSnapshot.ownChannelId || ""
     readonly property string ownChannelName: stateSnapshot.ownChannelName || ""
     readonly property bool isConnected: stateSnapshot.connected === true
     readonly property string statusText: stateSnapshot.status || "Waiting\u2026"
-    readonly property string nodeUrl: stateSnapshot.nodeUrl || "http://localhost:8080"
+    readonly property string nodeUrl: stateSnapshot.nodeUrl || "http://127.0.0.1:8080"
     readonly property string dataDir: stateSnapshot.dataDir || ""
     readonly property bool isUploading: stateSnapshot.uploading === true
     readonly property bool storageIsReady: stateSnapshot.storageReady === true
@@ -104,15 +113,20 @@ Rectangle {
 
     function call(method, args) {
         if (!basecampMode) return ""
-        return logos.callModule("yolo_board_module", method, args || [])
+        var s = logos.callModule("yolo_board_module", method, args || [])
+        // callModule double-encodes QString results (serializeResult wraps them in JSON)
+        return (s && s[0] === '"') ? JSON.parse(s) : s
     }
 
     function refresh() {
         var s = call("get_state", [])
-        try {
-            stateSnapshot = JSON.parse(s)
-            if (stateSnapshot.channels) channelList = stateSnapshot.channels
-        } catch(e) {}
+        if (s && s[0] === "{") {
+            try {
+                var parsed = JSON.parse(s)
+                stateSnapshot = parsed
+                if (stateSnapshot.channels) channelList = stateSnapshot.channels
+            } catch(e) {}
+        }
         loadMessagesForCurrent()
         // Cheap: pulls the participated-threads JSON so the 💬 badge on
         // per-message buttons stays in sync if the list grew elsewhere.
@@ -156,8 +170,9 @@ Rectangle {
     }
 
     function doConnect() {
+        connecting = true
+        connectingTimeout.restart()
         call("configure", [dataDirInput.text.trim(), nodeInput.text.trim()])
-        // Configure returns "pending" immediately — state arrives via subsequent get_state polls
     }
 
     function doSubscribe() {
@@ -288,12 +303,32 @@ Rectangle {
             participatedThreadsList = list
         } catch(e) { participatedThreadsList = [] }
     }
+    // Old messages published without "v" arrive with displayText = raw JSON.
+    // Parse them here so the UI shows text + media correctly.
+    function msgText(msg) {
+        var t = msg.displayText || ""
+        if (t.startsWith("{")) {
+            try {
+                var obj = JSON.parse(t)
+                if (obj && (obj.text !== undefined || obj.media !== undefined))
+                    return obj.text || ""
+            } catch(e) {}
+        }
+        return t || msg.data || ""
+    }
+    function msgMedia(msg) {
+        if (msg.media && msg.media.length > 0) return msg.media
+        var t = msg.displayText || msg.data || ""
+        if (t.startsWith("{")) {
+            try { var obj = JSON.parse(t); if (obj && obj.media) return obj.media } catch(e) {}
+        }
+        return []
+    }
+
     function findParentPreview(channelId, msgId) {
         for (var i = 0; i < messagesList.length; i++) {
             var m = messagesList[i]
-            if (m && m.id === msgId) {
-                return m.displayText || m.data || ""
-            }
+            if (m && m.id === msgId) return msgText(m)
         }
         return ""
     }
@@ -660,17 +695,17 @@ Rectangle {
                                 }
                                 Text {
                                     width: parent.width
-                                    text: modelData.displayText || modelData.data || ""
+                                    text: msgText(modelData)
                                     color: isFailed ? theme.error : isPending ? theme.textMuted : theme.text
                                     font.pixelSize: theme.fontPrimary
                                     font.strikeout: isFailed
                                     wrapMode: Text.Wrap
                                     opacity: isPending ? 0.5 : 1.0
-                                    visible: (modelData.displayText || modelData.data || "").length > 0
+                                    visible: msgText(modelData).length > 0
                                 }
                                 Repeater {
                                     id: mediaRepeater
-                                    model: modelData.media || []
+                                    model: msgMedia(modelData)
                                     delegate: Item {
                                         id: mediaSlot
                                         property var entry: mediaRepeater.model[index]
@@ -771,7 +806,7 @@ Rectangle {
                                             onClicked: openThread(
                                                 modelData.channel || "",
                                                 modelData.id || "",
-                                                modelData.displayText || modelData.data || "")
+                                                msgText(modelData))
                                         }
                                     }
                                 }
@@ -920,8 +955,9 @@ Rectangle {
                 }
                 Button {
                     Layout.fillWidth: true
-                    text: "Connect"; font.pixelSize: theme.fontPrimary; font.weight: Font.Medium
-                    enabled: dataDirInput.text.length > 0
+                    text: connecting ? "Connecting…" : "Connect"
+                    font.pixelSize: theme.fontPrimary; font.weight: Font.Medium
+                    enabled: dataDirInput.text.length > 0 && !connecting
                     contentItem: Text { text: parent.text; color: theme.text; font: parent.font; horizontalAlignment: Text.AlignHCenter }
                     background: Rectangle { color: parent.enabled ? (parent.down ? theme.accentHover : theme.accent) : theme.surface; radius: 6; implicitHeight: 40 }
                     onClicked: doConnect()
